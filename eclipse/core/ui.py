@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 import shlex
 from pathlib import Path
-
 from eclipse.core import style as ui
 from eclipse.modules.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
 from eclipse.system.errors import EclipseError
@@ -32,7 +30,7 @@ from eclipse.modules.plugins import list_plugins
 from eclipse.system.recovery import archive_snapshot, snapshot
 from eclipse.modules.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, password_status, run_checks, write_report
 from eclipse.modules.scripts import add_script, load_scripts, run_script
-from eclipse.modules.vps import format_upload_result, upload_path
+from eclipse.vps.vps import format_upload_result, upload_path
 
 LOGO = r"""
     ______     __  _
@@ -41,6 +39,8 @@ LOGO = r"""
  / /___/ /__/ / / / /_/ (__  )  __/
 /_____/\___/_/_/_/ .___/____/\___/
                 /_/
+    
+    by Aegon
 """
 
 
@@ -78,12 +78,36 @@ def pause() -> None:
 
 
 def local_panel(status: LocalStatus) -> list[str]:
+    gpu_usage = f"{status.gpu.usage_percent:.1f}%" if status.gpu.usage_percent is not None else "N/A"
     return [
         ui.neon("╭─ MAC // LOCAL CORE ────────────╮", bold=True),
         f"{ui.neon('│')} {ui.muted('RAM')}  {ui.gauge(status.memory_percent, 13)} {ui.neon('│')}",
         f"{ui.neon('│')} {ui.muted('SSD')}  {ui.gauge(status.disk.percent, 13)} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('GPU')}  {ui.accent(gpu_usage):>24} {ui.neon('│')}",
         f"{ui.neon('│')} {ui.muted('OS')}   {ui.accent(status.release or status.system):>24} {ui.neon('│')}",
         f"{ui.neon('│')} {ui.muted('ARCH')} {ui.paint(status.machine, ui.WHITE):>24} {ui.neon('│')}",
+        ui.neon("╰────────────────────────────────╯", bold=True),
+    ]
+
+
+def network_panel(status: LocalStatus) -> list[str]:
+    firewall = ui.success(status.network.firewall) if status.network.firewall == "enabled" else ui.danger(status.network.firewall)
+    stealth = ui.success(status.network.stealth) if status.network.stealth == "enabled" else ui.muted(status.network.stealth)
+    dns = ", ".join(status.network.dns[:2]) if status.network.dns else "N/A"
+    interface = status.network.interface[:23]
+    ip_address = status.network.ip_address[:23]
+    router = status.network.router[:22]
+    wifi = status.network.wifi[:23]
+    dns = dns[:23]
+    return [
+        ui.neon("╭─ NETWORK // FIREWALL ──────────╮", bold=True),
+        f"{ui.neon('│')} {ui.muted('IFACE')} {ui.accent(interface):>23} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('IP')}    {ui.paint(ip_address, ui.WHITE):>23} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('ROUTER')} {ui.paint(router, ui.WHITE):>22} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('WIFI')}  {ui.paint(wifi, ui.WHITE):>23} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('DNS')}   {ui.paint(dns, ui.WHITE):>23} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('FW')}    {firewall:>23} {ui.neon('│')}",
+        f"{ui.neon('│')} {ui.muted('STEALTH')} {stealth:>20} {ui.neon('│')}",
         ui.neon("╰────────────────────────────────╯", bold=True),
     ]
 
@@ -91,14 +115,22 @@ def local_panel(status: LocalStatus) -> list[str]:
 def local_status_menu() -> None:
     status = local_status()
     header("MAC // LOCAL STATUS")
-    print(f"  {ui.muted('Host'):<18} {ui.accent(status.hostname)}")
-    print(f"  {ui.muted('macOS'):<18} {status.release or status.system}")
-    print(f"  {ui.muted('Architecture'):<18} {status.machine}")
-    print(f"  {ui.muted('CPU'):<18} {status.processor or 'N/A'}")
-    print(f"  {ui.muted('Home folder'):<18} {status.home}")
-    print(f"  {ui.muted('Shell'):<18} {status.shell or 'N/A'}")
-    print(f"\n  {ui.muted('Memory')} {ui.gauge(status.memory_percent, 24)} {human_size(status.memory_used)} / {human_size(status.memory_total)}")
-    print(f"  {ui.muted('Disk /')} {ui.gauge(status.disk.percent, 24)} {human_size(status.disk.used)} / {human_size(status.disk.total)}")
+    gpu_usage = f"{status.gpu.usage_percent:.1f}%" if status.gpu.usage_percent is not None else "N/A"
+    left = [
+        f"{ui.muted('Host'):<18} {ui.accent(status.hostname)}",
+        f"{ui.muted('macOS'):<18} {status.release or status.system}",
+        f"{ui.muted('Architecture'):<18} {status.machine}",
+        f"{ui.muted('CPU'):<18} {status.processor or 'N/A'}",
+        f"{ui.muted('GPU'):<18} {', '.join(status.gpu.names) or 'N/A'}",
+        f"{ui.muted('GPU usage'):<18} {gpu_usage} ({status.gpu.detail})",
+        f"{ui.muted('Admin users'):<18} {', '.join(status.admin_users) or 'N/A'}",
+        f"{ui.muted('Home folder'):<18} {status.home}",
+        f"{ui.muted('Shell'):<18} {status.shell or 'N/A'}",
+        "",
+        f"{ui.muted('Memory')} {ui.gauge(status.memory_percent, 24)} {human_size(status.memory_used)} / {human_size(status.memory_total)}",
+        f"{ui.muted('Disk /')} {ui.gauge(status.disk.percent, 24)} {human_size(status.disk.used)} / {human_size(status.disk.total)}",
+    ]
+    ui.columns([f"  {line}" for line in left], network_panel(status), left_width=76)
 
 
 def local_files_menu() -> None:
@@ -508,7 +540,7 @@ def logs_menu() -> None:
 
 def vps_menu() -> None:
     while True:
-        header("VPS // TRANSFERS")
+        header("VPS ")
         print(ui.menu_line("[1]", "Upload file or folder"))
         print(ui.menu_line("[0]", "Back"), "\n")
         choice = input(ui.prompt()).strip()
@@ -556,7 +588,7 @@ def launch() -> None:
             ui.menu_line("[7]", "Plugins"),
             ui.menu_line("[8]", "Recovery"),
             ui.menu_line("[9]", "Logs"),
-            ui.menu_line("[10]", "VPS transfers"),
+            ui.menu_line("[10]", "VPS"),
             ui.menu_line("[0]", "Quit", danger_action=True),
         ]
         ui.columns(menu, local_panel(status))

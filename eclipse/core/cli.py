@@ -32,7 +32,7 @@ from eclipse.modules.plugins import create_plugin, list_plugins
 from eclipse.system.recovery import archive_snapshot, restore_snapshot, snapshot
 from eclipse.modules.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, format_password_status, password_status, run_checks, write_report
 from eclipse.modules.scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
-from eclipse.modules.vps import format_upload_result, upload_path, upload_result_json
+from eclipse.vps.vps import format_upload_result, upload_path, upload_result_json
 from eclipse.core.ui import launch
 
 
@@ -277,9 +277,9 @@ def parser() -> argparse.ArgumentParser:
     vps_commands = vps.add_subparsers(dest="vps_command", required=True)
     item = vps_commands.add_parser("upload", help="send a local file or folder to a VPS")
     item.add_argument("source", type=Path)
-    item.add_argument("--host", required=True, help="VPS host or IP")
+    item.add_argument("--host", help="VPS host or IP")
     item.add_argument("--user", help="SSH user")
-    item.add_argument("--remote-path", required=True, help="remote destination folder")
+    item.add_argument("--remote-path", help="remote destination folder")
     item.add_argument("--port", type=int, help="SSH port")
     item.add_argument("--identity", type=Path, help="SSH private key")
     item.add_argument("--dry-run", action="store_true", help="show transfer plan without uploading")
@@ -303,12 +303,23 @@ def print_memory(entries: list[MemoryEntry], *, limit: int) -> None:
 
 def print_mac_status() -> None:
     status = local_status()
+    gpu_usage = f"{status.gpu.usage_percent:.1f}%" if status.gpu.usage_percent is not None else "N/A"
     print(f"Mac : {status.hostname}")
     print(f"macOS : {status.release or status.system}")
     print(f"Architecture : {status.machine}")
     print(f"CPU : {status.processor or 'N/A'}")
     print(f"RAM : {status.memory_percent:.1f}%")
     print(f"Disk / : {status.disk.percent:.1f}%")
+    print(f"GPU : {gpu_usage}")
+    print(f"GPU name : {', '.join(status.gpu.names) or 'N/A'}")
+    print(f"Admin users : {', '.join(status.admin_users) or 'N/A'}")
+    print(f"Network interface : {status.network.interface}")
+    print(f"IP address : {status.network.ip_address}")
+    print(f"Router : {status.network.router}")
+    print(f"Wi-Fi : {status.network.wifi}")
+    print(f"DNS : {', '.join(status.network.dns) or 'N/A'}")
+    print(f"Firewall : {status.network.firewall}")
+    print(f"Stealth mode : {status.network.stealth}")
     print(f"Home : {status.home}")
 
 

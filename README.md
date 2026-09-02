@@ -1,4 +1,4 @@
-# Eclipse - Alpha
+# Eclipse 0.3
 
 Eclipse is a local macOS control center. It helps inspect the current Mac,
 browse common user folders, store local notes, run personal scripts, and review
@@ -409,6 +409,32 @@ eclipse vps upload ~/Backups/eclipse.tar.gz --host example.com --port 2222 --rem
 `--dry-run` asks `rsync` to show what would be transferred before writing to the
 VPS. The command validates the local source, SSH port, identity file, host, user,
 and remote path before starting the transfer.
+
+VPS-specific code lives under:
+
+```text
+eclipse/vps/
+  vps.py
+  config/config.sh
+```
+
+`config/config.sh` can store optional defaults:
+
+```bash
+ECLIPSE_VPS_HOST="example.com"
+ECLIPSE_VPS_USER="deploy"
+ECLIPSE_VPS_REMOTE_PATH="/srv/uploads"
+ECLIPSE_VPS_PORT="22"
+ECLIPSE_VPS_IDENTITY="~/.ssh/id_ed25519"
+```
+
+Eclipse reads simple `KEY=value` lines from this file; it does not execute the
+file as shell code. When these values are configured, the upload command can be
+shorter:
+
+```bash
+eclipse vps upload ~/Documents/report.pdf --dry-run
+```
 
 ## Plugins
 

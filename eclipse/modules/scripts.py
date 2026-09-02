@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 import getpass
 import os
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-
 from eclipse.modules.audit import record
 from eclipse.system.errors import EclipseError
 from eclipse.system.runner import Result, shell_display
