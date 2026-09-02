@@ -1,4 +1,4 @@
-# Eclipse 0.3
+# Eclipse - Alpha
 
 Eclipse is a local macOS control center. It helps inspect the current Mac,
 browse common user folders, store local notes, run personal scripts, and review
