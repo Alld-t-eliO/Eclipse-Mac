@@ -6,9 +6,10 @@ from pathlib import Path
 
 from . import __version__
 from .errors import EclipseError
-from .inbox import local_files
+from .inbox import copy_path, format_entry, list_entries, local_files, make_directory, move_path, open_path, read_text, rename_path, trash_path, write_text
 from .local_system import common_folders, local_status
 from .memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
+from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
 from .scripts import add_script, get_script, load_scripts, remove_script, run_script
 from .ui import launch
 
@@ -26,6 +27,64 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--limit", type=int, default=20)
 
     commands.add_parser("ui", help="ouvrir le centre de contrôle Mac interactif")
+
+    files = commands.add_parser("files", aliases=["file"], help="explorer et gérer les fichiers locaux")
+    files_commands = files.add_subparsers(dest="files_command", required=True)
+
+    item = files_commands.add_parser("ls", help="lister un dossier")
+    item.add_argument("path", nargs="?", type=Path, default=Path.home())
+    item.add_argument("--limit", type=int, default=50)
+    item.add_argument("--hidden", action="store_true", help="inclure les fichiers cachés")
+
+    item = files_commands.add_parser("cat", help="afficher un fichier texte")
+    item.add_argument("path", type=Path)
+    item.add_argument("--max-bytes", type=int, default=20000)
+
+    item = files_commands.add_parser("write", help="écrire un fichier texte")
+    item.add_argument("path", type=Path)
+    item.add_argument("text", nargs="+")
+    item.add_argument("--append", action="store_true")
+    item.add_argument("--overwrite", action="store_true")
+
+    item = files_commands.add_parser("mkdir", help="créer un dossier")
+    item.add_argument("path", type=Path)
+
+    item = files_commands.add_parser("copy", help="copier un fichier ou dossier")
+    item.add_argument("source", type=Path)
+    item.add_argument("destination", type=Path)
+    item.add_argument("--overwrite", action="store_true")
+
+    item = files_commands.add_parser("move", help="déplacer un fichier ou dossier")
+    item.add_argument("source", type=Path)
+    item.add_argument("destination", type=Path)
+    item.add_argument("--overwrite", action="store_true")
+
+    item = files_commands.add_parser("rename", help="renommer un fichier ou dossier")
+    item.add_argument("source", type=Path)
+    item.add_argument("name")
+    item.add_argument("--overwrite", action="store_true")
+
+    item = files_commands.add_parser("trash", help="déplacer vers la Corbeille")
+    item.add_argument("path", type=Path)
+    item.add_argument("--yes", action="store_true", help="confirmer l'action")
+
+    item = files_commands.add_parser("open", help="ouvrir avec macOS")
+    item.add_argument("path", type=Path)
+
+    security = commands.add_parser("security", help="auditer la sécurité du Mac")
+    security_commands = security.add_subparsers(dest="security_command", required=True)
+    item = security_commands.add_parser("scan", help="lancer un audit sécurité")
+    item.add_argument("--check", action="append", choices=DEFAULT_CHECKS, help="check ciblé, répétable")
+    item.add_argument("--deep", action="store_true", help="lancer les checks plus longs")
+    item.add_argument("--json", action="store_true", help="écrire un rapport JSON privé")
+    item.add_argument("--output-dir", type=Path, help="dossier des rapports JSON")
+
+    admin = commands.add_parser("admin", help="administrer l'état local du Mac")
+    admin_commands = admin.add_subparsers(dest="admin_command", required=True)
+    admin_commands.add_parser("status", help="afficher un résumé système et sécurité")
+    item = admin_commands.add_parser("report", help="écrire un rapport sécurité JSON")
+    item.add_argument("--deep", action="store_true")
+    item.add_argument("--output-dir", type=Path)
 
     memory = commands.add_parser("memory", aliases=["mem"], help="gérer la mémoire locale macOS")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
@@ -143,6 +202,47 @@ def dispatch(args: argparse.Namespace) -> None:
             print(f"{folder}")
             print("\n".join(local_files(folder, limit=args.limit)) or "Aucun fichier.")
         return
+    if args.command in {"files", "file"}:
+        if args.files_command == "ls":
+            entries = list_entries(args.path, limit=args.limit, include_hidden=args.hidden)
+            print(args.path.expanduser().resolve())
+            print("\n".join(format_entry(entry) for entry in entries) or "Aucun fichier.")
+        elif args.files_command == "cat":
+            print(read_text(args.path, max_bytes=args.max_bytes), end="")
+        elif args.files_command == "write":
+            print(f"Fichier écrit : {write_text(args.path, ' '.join(args.text), append=args.append, overwrite=args.overwrite)}")
+        elif args.files_command == "mkdir":
+            print(f"Dossier créé : {make_directory(args.path)}")
+        elif args.files_command == "copy":
+            print(f"Copie : {copy_path(args.source, args.destination, overwrite=args.overwrite)}")
+        elif args.files_command == "move":
+            print(f"Déplacement : {move_path(args.source, args.destination, overwrite=args.overwrite)}")
+        elif args.files_command == "rename":
+            print(f"Renommage : {rename_path(args.source, args.name, overwrite=args.overwrite)}")
+        elif args.files_command == "trash":
+            if not args.yes:
+                raise EclipseError("Ajoute --yes pour confirmer le déplacement vers la Corbeille.")
+            print(f"Corbeille : {trash_path(args.path)}")
+        elif args.files_command == "open":
+            print(f"Ouverture : {open_path(args.path)}")
+        return
+    if args.command == "security":
+        if args.security_command == "scan":
+            findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
+            print(format_findings(findings))
+            if args.json:
+                print(f"\nRapport : {write_report(findings, args.output_dir)}")
+        return
+    if args.command == "admin":
+        if args.admin_command == "status":
+            print_mac_status()
+            findings = run_checks(("security", "firewall", "sharing", "updates"))
+            print()
+            print(format_findings(findings))
+        elif args.admin_command == "report":
+            findings = run_checks(DEFAULT_CHECKS, deep=args.deep)
+            print(f"Rapport : {write_report(findings, args.output_dir)}")
+        return
     if args.command in {"memory", "mem"}:
         if args.memory_command == "add":
             entry = add_memory(
@@ -183,7 +283,8 @@ def dispatch(args: argparse.Namespace) -> None:
             for script in scripts.values():
                 tags = f" #{' #'.join(script.tags)}" if script.tags else ""
                 description = f" · {script.description}" if script.description else ""
-                print(f"{script.name}{tags}{description}")
+                source = " · drop-in" if script.source == "drop-in" else ""
+                print(f"{script.name}{tags}{source}{description}")
                 print(f"  {script.path}")
         elif args.scripts_command == "path":
             print(get_script(args.name).path)

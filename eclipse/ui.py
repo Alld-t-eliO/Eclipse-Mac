@@ -5,9 +5,10 @@ from pathlib import Path
 
 from . import style as ui
 from .errors import EclipseError
-from .inbox import local_files
-from .local_system import LocalStatus, common_folders, local_status
+from .inbox import copy_path, format_entry, list_entries, make_directory, move_path, open_path, read_text, rename_path, trash_path, write_text
+from .local_system import LocalStatus, local_status
 from .memory import add_memory, filter_memories, load_memories, summarize
+from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
 from .scripts import load_scripts, run_script
 
 LOGO = r"""
@@ -68,24 +69,97 @@ def local_status_menu() -> None:
 
 
 def local_files_menu() -> None:
+    current = Path.home()
     while True:
-        header("FICHIERS // MAC LOCAL")
-        folders = common_folders()
-        for index, folder in enumerate(folders, 1):
-            print(ui.menu_line(f"[{index}]", str(folder)))
+        current = current.expanduser().resolve()
+        header("FICHIERS // EXPLORATEUR")
+        print(f"  {ui.neon(str(current), bold=True)}\n")
+        entries = list_entries(current, limit=30)
+        if entries:
+            for index, entry in enumerate(entries, 1):
+                marker = "/" if entry.kind == "directory" else ""
+                print(ui.menu_line(f"[{index}]", f"{format_entry(entry)}{marker}"))
+        else:
+            print(f"  {ui.muted('Aucun fichier visible.')}")
+        print()
+        print(ui.menu_line("[cd]", "aller à un chemin"))
+        print(ui.menu_line("[..]", "dossier parent"))
+        print(ui.menu_line("[cat]", "aperçu fichier texte"))
+        print(ui.menu_line("[new]", "créer fichier texte"))
+        print(ui.menu_line("[mkdir]", "créer dossier"))
+        print(ui.menu_line("[ren]", "renommer"))
+        print(ui.menu_line("[cp]", "copier"))
+        print(ui.menu_line("[mv]", "déplacer"))
+        print(ui.menu_line("[trash]", "envoyer à la Corbeille"))
+        print(ui.menu_line("[open]", "ouvrir avec macOS"))
         print(ui.menu_line("[0]", "Retour"), "\n")
-        choice = input(ui.prompt("Dossier")).strip()
+        choice = input(ui.prompt("Action ou numéro")).strip()
         if choice == "0":
             return
-        if choice.isdigit() and 1 <= int(choice) <= len(folders):
-            folder = folders[int(choice) - 1]
-            header("FICHIERS // MAC LOCAL")
-            print(f"  {ui.neon(str(folder), bold=True)}\n")
-            rows = local_files(folder, limit=30)
-            print("\n".join(f"  {row}" for row in rows) if rows else f"  {ui.muted('Aucun fichier visible.')}")
-        else:
-            print(ui.danger("Choix invalide."))
-        pause()
+        try:
+            if choice == "..":
+                current = current.parent
+            elif choice.isdigit() and 1 <= int(choice) <= len(entries):
+                selected = entries[int(choice) - 1]
+                if selected.kind == "directory":
+                    current = selected.path
+                else:
+                    print()
+                    print(read_text(selected.path, max_bytes=12000))
+                    pause()
+            elif choice == "cd":
+                current = Path(input(ui.prompt("Chemin")).strip() or str(current))
+            elif choice == "cat":
+                path = Path(input(ui.prompt("Fichier")).strip())
+                target = path if path.is_absolute() else current / path
+                print()
+                print(read_text(target, max_bytes=12000))
+                pause()
+            elif choice == "new":
+                path = Path(input(ui.prompt("Fichier")).strip())
+                target = path if path.is_absolute() else current / path
+                text = input(ui.prompt("Texte")).strip()
+                overwrite = input(ui.prompt("Écraser si existe [oui/N]")).strip().lower() == "oui"
+                print(f"  {ui.success('●')} Fichier écrit : {write_text(target, text, overwrite=overwrite)}")
+                pause()
+            elif choice == "mkdir":
+                path = Path(input(ui.prompt("Dossier")).strip())
+                target = path if path.is_absolute() else current / path
+                print(f"  {ui.success('●')} Dossier créé : {make_directory(target)}")
+                pause()
+            elif choice == "ren":
+                path = Path(input(ui.prompt("Chemin")).strip())
+                target = path if path.is_absolute() else current / path
+                name = input(ui.prompt("Nouveau nom")).strip()
+                print(f"  {ui.success('●')} Renommage : {rename_path(target, name)}")
+                pause()
+            elif choice in {"cp", "mv"}:
+                source_raw = Path(input(ui.prompt("Source")).strip())
+                destination_raw = Path(input(ui.prompt("Destination")).strip())
+                source = source_raw if source_raw.is_absolute() else current / source_raw
+                destination = destination_raw if destination_raw.is_absolute() else current / destination_raw
+                overwrite = input(ui.prompt("Écraser si existe [oui/N]")).strip().lower() == "oui"
+                action = copy_path if choice == "cp" else move_path
+                print(f"  {ui.success('●')} Résultat : {action(source, destination, overwrite=overwrite)}")
+                pause()
+            elif choice == "trash":
+                path = Path(input(ui.prompt("Chemin")).strip())
+                target = path if path.is_absolute() else current / path
+                answer = input(ui.prompt(f"Envoyer {target} à la Corbeille [oui/N]")).strip().lower()
+                if answer == "oui":
+                    print(f"  {ui.success('●')} Corbeille : {trash_path(target)}")
+                pause()
+            elif choice == "open":
+                path = Path(input(ui.prompt("Chemin")).strip() or str(current))
+                target = path if path.is_absolute() else current / path
+                print(f"  {ui.success('●')} Ouverture : {open_path(target)}")
+                pause()
+            else:
+                print(ui.danger("Choix invalide."))
+                pause()
+        except EclipseError as error:
+            print(ui.danger(f"\n  ✗ {error}"))
+            pause()
 
 
 def memory_menu() -> None:
@@ -138,7 +212,8 @@ def local_scripts_menu() -> None:
             for index, script in enumerate(scripts, 1):
                 tags = f" #{' #'.join(script.tags)}" if script.tags else ""
                 description = f" · {script.description}" if script.description else ""
-                print(ui.menu_line(f"[{index}]", f"{script.name}{tags}{description}"))
+                source = " · drop-in" if script.source == "drop-in" else ""
+                print(ui.menu_line(f"[{index}]", f"{script.name}{tags}{source}{description}"))
         else:
             print(f"  {ui.muted('Aucun script local enregistré.')}")
         print(ui.menu_line("[0]", "Retour"), "\n")
@@ -162,6 +237,46 @@ def local_scripts_menu() -> None:
         pause()
 
 
+def security_menu() -> None:
+    checks = (
+        ("security", "Contrôles Apple"),
+        ("firewall", "Firewall"),
+        ("sharing", "Partage distant"),
+        ("network", "Réseau"),
+        ("persistence", "Persistance"),
+        ("services", "Services"),
+        ("updates", "Mises à jour"),
+        ("filesystem", "Fichiers sensibles"),
+        ("processes", "Processus"),
+        ("docker", "Docker"),
+    )
+    while True:
+        header("ADMINISTRATION & SÉCURITÉ")
+        print(ui.menu_line("[1]", "Scan rapide"))
+        print(ui.menu_line("[2]", "Rapport JSON complet"))
+        for index, (_, label) in enumerate(checks, 3):
+            print(ui.menu_line(f"[{index}]", label))
+        print(ui.menu_line("[0]", "Retour"), "\n")
+        choice = input(ui.prompt()).strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            findings = run_checks(("security", "firewall", "sharing", "updates"))
+            print()
+            print(format_findings(findings))
+        elif choice == "2":
+            findings = run_checks(DEFAULT_CHECKS)
+            print(f"\n  {ui.success('●')} Rapport : {write_report(findings)}")
+        elif choice.isdigit() and 3 <= int(choice) < 3 + len(checks):
+            check = checks[int(choice) - 3][0]
+            findings = run_checks((check,))
+            print()
+            print(format_findings(findings))
+        else:
+            print(ui.danger("Choix invalide."))
+        pause()
+
+
 def launch() -> None:
     ui.boot_animation()
     while True:
@@ -172,6 +287,7 @@ def launch() -> None:
             ui.menu_line("[2]", "Fichiers locaux"),
             ui.menu_line("[3]", "Mémoire locale"),
             ui.menu_line("[4]", "Scripts locaux"),
+            ui.menu_line("[5]", "Administration & sécurité"),
             ui.menu_line("[0]", "Quitter", danger_action=True),
         ]
         ui.columns(menu, local_panel(status))
@@ -185,6 +301,7 @@ def launch() -> None:
             "2": local_files_menu,
             "3": memory_menu,
             "4": local_scripts_menu,
+            "5": security_menu,
         }
         action = actions.get(choice)
         if action is None:

@@ -32,6 +32,7 @@ class LocalScript:
     added_at: str
     description: str | None = None
     tags: tuple[str, ...] = ()
+    source: str = "registry"
 
     @classmethod
     def from_record(cls, record: dict[str, Any], root: Path) -> LocalScript:
@@ -46,6 +47,7 @@ class LocalScript:
             added_at=str(record.get("added_at", "")),
             description=str(record["description"]) if record.get("description") else None,
             tags=tuple(str(tag) for tag in tags),
+            source="registry",
         )
 
     def to_record(self, root: Path) -> dict[str, Any]:
@@ -63,6 +65,18 @@ def default_scripts_home() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / "Library" / "Application Support" / "Eclipse" / "scripts"
+
+
+def project_scripts_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "scripts"
+
+
+def package_scripts_dir() -> Path:
+    return Path(__file__).resolve().parent / "scripts"
+
+
+def project_scripts_dirs() -> tuple[Path, ...]:
+    return (project_scripts_dir(), package_scripts_dir())
 
 
 def files_dir(root: Path | None = None) -> Path:
@@ -101,7 +115,23 @@ def resolve_inside(root: Path, relative_path: str) -> Path:
     return target
 
 
-def load_scripts(root: Path | None = None) -> dict[str, LocalScript]:
+def safe_dropin_name(path: Path, used: set[str]) -> str:
+    base = path.stem if path.suffix else path.name
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", base).strip(".-")
+    if not name or not re.match(r"^[A-Za-z0-9]", name):
+        name = f"script-{path.name}"
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip(".-")
+    name = name[:64]
+    candidate = name
+    index = 2
+    while candidate in used:
+        suffix = f"-{index}"
+        candidate = f"{name[:64 - len(suffix)]}{suffix}"
+        index += 1
+    return validate_name(candidate)
+
+
+def load_registered_scripts(root: Path | None = None) -> dict[str, LocalScript]:
     home = (root or default_scripts_home()).expanduser().resolve()
     path = registry_path(home)
     if not path.exists():
@@ -122,10 +152,53 @@ def load_scripts(root: Path | None = None) -> dict[str, LocalScript]:
     return scripts
 
 
+def load_dropin_scripts(directory: Path | None = None, *, used_names: set[str] | None = None) -> dict[str, LocalScript]:
+    folder = (directory or project_scripts_dir()).expanduser().resolve()
+    if not folder.exists():
+        return {}
+    if not folder.is_dir():
+        raise EclipseError(f"Dossier scripts invalide : {folder}")
+    scripts: dict[str, LocalScript] = {}
+    used = set(used_names or set())
+    for path in sorted(folder.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        name = safe_dropin_name(path, used)
+        used.add(name)
+        try:
+            added_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        except OSError:
+            added_at = datetime.now(timezone.utc).isoformat()
+        scripts[name] = LocalScript(
+            name=name,
+            path=path,
+            added_at=added_at,
+            description="Drop-in script",
+            tags=("drop-in",),
+            source="drop-in",
+        )
+    return scripts
+
+
+def load_scripts(root: Path | None = None, *, include_dropins: bool = True) -> dict[str, LocalScript]:
+    scripts = load_registered_scripts(root)
+    if include_dropins:
+        used = set(scripts)
+        for directory in project_scripts_dirs():
+            dropins = load_dropin_scripts(directory, used_names=used)
+            scripts.update(dropins)
+            used.update(dropins)
+    return scripts
+
+
 def save_scripts(scripts: dict[str, LocalScript], root: Path | None = None) -> None:
     home = (root or default_scripts_home()).expanduser().resolve()
     path = registry_path(home)
-    records = [script.to_record(home) for script in sorted(scripts.values(), key=lambda item: item.name)]
+    records = [
+        script.to_record(home)
+        for script in sorted(scripts.values(), key=lambda item: item.name)
+        if script.source == "registry"
+    ]
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -150,7 +223,7 @@ def add_script(
     home = (root or default_scripts_home()).expanduser().resolve()
     target_dir = files_dir(home)
     target = target_dir / f"{clean_name}{source_path.suffix}"
-    scripts = load_scripts(home)
+    scripts = load_registered_scripts(home)
     if clean_name in scripts and not overwrite:
         raise EclipseError(f"Script déjà enregistré : {clean_name}")
     try:
@@ -174,10 +247,12 @@ def add_script(
 def remove_script(name: str, *, root: Path | None = None, delete_file: bool = False) -> LocalScript:
     clean_name = validate_name(name)
     home = (root or default_scripts_home()).expanduser().resolve()
-    scripts = load_scripts(home)
+    scripts = load_registered_scripts(home)
     try:
         script = scripts.pop(clean_name)
     except KeyError as error:
+        if clean_name in load_dropin_scripts(used_names=set(scripts)):
+            raise EclipseError("Les scripts du dossier ./scripts se retirent en supprimant le fichier.") from error
         raise EclipseError(f"Script inconnu : {clean_name}") from error
     if delete_file:
         try:
