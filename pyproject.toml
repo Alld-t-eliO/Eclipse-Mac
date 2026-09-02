@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eclipse-mac"
+version = "0.3.0"
+description = "Local control center for macOS"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+eclipse = "eclipse.core.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["eclipse*"]
+
+[tool.setuptools.package-data]
+eclipse = ["modules/scripts/*.sh", "plugins/*/plugin.json", "vps/config/*.sh"]

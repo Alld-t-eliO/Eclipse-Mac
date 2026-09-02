@@ -42,6 +42,13 @@ python3 -m venv ~/.local/share/eclipse-venv
 ~/.local/share/eclipse-venv/bin/eclipse ui
 ```
 
+Install with the helper script from the project root:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
 Alternative install from a source archive:
 
 ```bash
