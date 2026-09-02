@@ -4,6 +4,7 @@ import shlex
 from pathlib import Path
 
 from . import style as ui
+from .automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
 from .errors import EclipseError
 from .inbox import (
     copy_path,
@@ -26,6 +27,8 @@ from .inbox import (
 )
 from .local_system import LocalStatus, local_status
 from .memory import add_memory, filter_memories, load_memories, summarize
+from .plugins import list_plugins
+from .recovery import archive_snapshot, snapshot
 from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
 from .scripts import add_script, load_scripts, run_script
 
@@ -360,6 +363,86 @@ def security_menu() -> None:
         pause()
 
 
+def automation_menu() -> None:
+    while True:
+        header("AUTOMATIONS // PLANIFIÉES")
+        jobs = load_jobs()
+        if jobs:
+            for index, job in enumerate(jobs.values(), 1):
+                state = "on" if job.enabled else "off"
+                print(ui.menu_line(f"[{index}]", f"{job.name} · {state} · every {job.every}"))
+        else:
+            print(f"  {ui.muted('Aucune automation.')}")
+        print()
+        print(ui.menu_line("[add]", "ajouter"))
+        print(ui.menu_line("[run]", "lancer"))
+        print(ui.menu_line("[due]", "lancer les automations dues"))
+        print(ui.menu_line("[off]", "désactiver"))
+        print(ui.menu_line("[on]", "activer"))
+        print(ui.menu_line("[hist]", "historique"))
+        print(ui.menu_line("[0]", "Retour"), "\n")
+        choice = input(ui.prompt()).strip()
+        if choice == "0":
+            return
+        if choice == "add":
+            name = input(ui.prompt("Nom")).strip()
+            every = input(ui.prompt("Intervalle hour/day/week")).strip()
+            command = input(ui.prompt("Commande Eclipse optionnelle")).strip()
+            job = add_job(name, every=every, command=shlex.split(command) if command else None)
+            print(f"  {ui.success('●')} Automation ajoutée : {job.name}")
+        elif choice == "run":
+            name = input(ui.prompt("Nom")).strip()
+            dry = input(ui.prompt("Dry-run [oui/N]")).strip().lower() == "oui"
+            result = run_job(name, dry_run=dry)
+            print(f"  {ui.success('●')} Code : {result.returncode}")
+            if result.stdout:
+                print(f"  {result.stdout}")
+        elif choice == "due":
+            rows = run_due(dry_run=input(ui.prompt("Dry-run [oui/N]")).strip().lower() == "oui")
+            print(f"  {ui.success('●')} Automations lancées : {len(rows)}")
+        elif choice in {"off", "on"}:
+            name = input(ui.prompt("Nom")).strip()
+            set_enabled(name, choice == "on")
+        elif choice == "hist":
+            for item in load_automation_history(limit=20):
+                print(f"  {item.get('timestamp')} {item.get('job')} code={item.get('returncode')}")
+        else:
+            print(ui.danger("Choix invalide."))
+        pause()
+
+
+def plugins_menu() -> None:
+    header("PLUGINS // MODULES")
+    plugins = list_plugins()
+    if plugins:
+        for plugin in plugins:
+            state = "on" if plugin.enabled else "off"
+            print(f"  {ui.accent(plugin.name)} [{state}] {plugin.description}")
+            print(f"    {plugin.path}")
+    else:
+        print(f"  {ui.muted('Aucun plugin.')}")
+
+
+def recovery_menu() -> None:
+    while True:
+        header("RECOVERY // BACKUP")
+        print(ui.menu_line("[1]", "Créer un snapshot"))
+        print(ui.menu_line("[2]", "Exporter un snapshot"))
+        print(ui.menu_line("[0]", "Retour"), "\n")
+        choice = input(ui.prompt()).strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            print(f"  {ui.success('●')} Snapshot : {snapshot()}")
+        elif choice == "2":
+            path = Path(input(ui.prompt("Snapshot")).strip())
+            password = input(ui.prompt("Mot de passe optionnel")).strip()
+            print(f"  {ui.success('●')} Export : {archive_snapshot(path, password=password or None)}")
+        else:
+            print(ui.danger("Choix invalide."))
+        pause()
+
+
 def launch() -> None:
     ui.boot_animation()
     while True:
@@ -371,6 +454,9 @@ def launch() -> None:
             ui.menu_line("[3]", "Mémoire locale"),
             ui.menu_line("[4]", "Scripts locaux"),
             ui.menu_line("[5]", "Administration & sécurité"),
+            ui.menu_line("[6]", "Automations"),
+            ui.menu_line("[7]", "Plugins"),
+            ui.menu_line("[8]", "Recovery"),
             ui.menu_line("[0]", "Quitter", danger_action=True),
         ]
         ui.columns(menu, local_panel(status))
@@ -385,6 +471,9 @@ def launch() -> None:
             "3": memory_menu,
             "4": local_scripts_menu,
             "5": security_menu,
+            "6": automation_menu,
+            "7": plugins_menu,
+            "8": recovery_menu,
         }
         action = actions.get(choice)
         if action is None:

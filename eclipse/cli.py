@@ -5,10 +5,12 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
 from .errors import EclipseError
 from .inbox import (
     copy_path,
     edit_line,
+    export_entries,
     favorites,
     file_info,
     format_entry,
@@ -27,8 +29,10 @@ from .inbox import (
 )
 from .local_system import common_folders, local_status
 from .memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
+from .plugins import create_plugin, list_plugins
+from .recovery import archive_snapshot, restore_snapshot, snapshot
 from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
-from .scripts import add_script, get_script, load_scripts, remove_script, run_script
+from .scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
 from .ui import launch
 
 
@@ -119,9 +123,17 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("root", type=Path)
     item.add_argument("query", nargs="?")
     item.add_argument("--name", help="motif de nom, par exemple *.py")
+    item.add_argument("--content", help="chercher dans le contenu UTF-8")
+    item.add_argument("--extension", help="filtrer par extension")
+    item.add_argument("--min-size", type=int)
+    item.add_argument("--max-size", type=int)
+    item.add_argument("--modified-after", help="date ISO YYYY-MM-DD")
+    item.add_argument("--modified-before", help="date ISO YYYY-MM-DD")
+    item.add_argument("--ignore", action="append", default=[], help="motif de dossier/fichier à ignorer")
     item.add_argument("--depth", type=int, default=4)
     item.add_argument("--limit", type=int, default=50)
     item.add_argument("--hidden", action="store_true")
+    item.add_argument("--export", type=Path, help="exporter les résultats JSON")
 
     item = files_commands.add_parser("chmod+x", help="rendre un fichier exécutable")
     item.add_argument("path", type=Path)
@@ -182,8 +194,15 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--description")
     item.add_argument("--tag", action="append", default=[], help="tag, répétable ou séparé par virgules")
     item.add_argument("--overwrite", action="store_true")
+    item.add_argument("--dry-run-required", action="store_true")
 
     scripts_commands.add_parser("list", help="lister les scripts enregistrés")
+
+    item = scripts_commands.add_parser("info", help="afficher le catalogue détaillé d'un script")
+    item.add_argument("name")
+
+    item = scripts_commands.add_parser("history", help="afficher l'historique d'exécution des scripts")
+    item.add_argument("--limit", type=int, default=20)
 
     item = scripts_commands.add_parser("path", help="afficher le chemin local d'un script")
     item.add_argument("name")
@@ -195,7 +214,48 @@ def parser() -> argparse.ArgumentParser:
     item = scripts_commands.add_parser("run", help="exécuter un script local")
     item.add_argument("name")
     item.add_argument("--dry-run", action="store_true")
+    item.add_argument("--force", action="store_true", help="forcer l'exécution d'un script marqué dry-run obligatoire")
     item.add_argument("arguments", nargs=argparse.REMAINDER)
+
+    automation = commands.add_parser("automation", aliases=["auto"], help="gérer les automations planifiées")
+    automation_commands = automation.add_subparsers(dest="automation_command", required=True)
+    item = automation_commands.add_parser("add", help="ajouter une automation")
+    item.add_argument("name")
+    item.add_argument("--every", required=True, choices=["hour", "day", "week"])
+    item.add_argument("--command", dest="automation_exec", nargs="+", help="commande Eclipse à exécuter, sans le mot eclipse")
+    item.add_argument("--overwrite", action="store_true")
+    automation_commands.add_parser("list", help="lister les automations")
+    item = automation_commands.add_parser("run", help="lancer une automation")
+    item.add_argument("name")
+    item.add_argument("--dry-run", action="store_true")
+    item = automation_commands.add_parser("run-due", help="lancer les automations dues")
+    item.add_argument("--dry-run", action="store_true")
+    item = automation_commands.add_parser("enable", help="activer une automation")
+    item.add_argument("name")
+    item = automation_commands.add_parser("disable", help="désactiver une automation")
+    item.add_argument("name")
+    item = automation_commands.add_parser("history", help="afficher l'historique automation")
+    item.add_argument("--limit", type=int, default=20)
+
+    plugins = commands.add_parser("plugins", aliases=["plugin"], help="gérer les modules Eclipse")
+    plugins_commands = plugins.add_subparsers(dest="plugins_command", required=True)
+    plugins_commands.add_parser("list", help="lister les plugins")
+    item = plugins_commands.add_parser("create", help="créer un squelette plugin")
+    item.add_argument("name")
+    item.add_argument("--description", default="")
+
+    recovery = commands.add_parser("recovery", help="snapshots, backups et restauration")
+    recovery_commands = recovery.add_subparsers(dest="recovery_command", required=True)
+    item = recovery_commands.add_parser("snapshot", help="créer un snapshot local")
+    item.add_argument("--destination", type=Path)
+    item = recovery_commands.add_parser("export", help="exporter un snapshot en archive")
+    item.add_argument("snapshot", type=Path)
+    item.add_argument("--destination", type=Path)
+    item.add_argument("--password", help="mot de passe pour export chiffré simple")
+    item = recovery_commands.add_parser("restore", help="restaurer un snapshot vers un dossier")
+    item.add_argument("snapshot", type=Path)
+    item.add_argument("--destination", type=Path)
+    item.add_argument("--yes", action="store_true")
     return root
 
 
@@ -304,8 +364,24 @@ def dispatch(args: argparse.Namespace) -> None:
                 print()
                 print(preview.content)
         elif args.files_command == "search":
-            entries = search_entries(args.root, args.query, name=args.name, max_depth=args.depth, limit=args.limit, include_hidden=args.hidden)
+            entries = search_entries(
+                args.root,
+                args.query,
+                name=args.name,
+                content=args.content,
+                extension=args.extension,
+                min_size=args.min_size,
+                max_size=args.max_size,
+                modified_after=args.modified_after,
+                modified_before=args.modified_before,
+                ignore=args.ignore,
+                max_depth=args.depth,
+                limit=args.limit,
+                include_hidden=args.hidden,
+            )
             print("\n".join(f"{entry.path}  ({entry.kind})" for entry in entries) or "Aucun résultat.")
+            if args.export:
+                print(f"Export : {export_entries(entries, args.export)}")
         elif args.files_command == "chmod+x":
             print(f"Exécutable : {make_executable(args.path, confirmed=args.yes)}")
         elif args.files_command == "script-add":
@@ -360,6 +436,7 @@ def dispatch(args: argparse.Namespace) -> None:
                 description=args.description,
                 tags=args.tag,
                 overwrite=args.overwrite,
+                dry_run_required=args.dry_run_required,
             )
             print(f"Script ajouté : {script.name} → {script.path}")
         elif args.scripts_command == "list":
@@ -370,8 +447,24 @@ def dispatch(args: argparse.Namespace) -> None:
                 tags = f" #{' #'.join(script.tags)}" if script.tags else ""
                 description = f" · {script.description}" if script.description else ""
                 source = " · drop-in" if script.source == "drop-in" else ""
-                print(f"{script.name}{tags}{source}{description}")
+                dry = " · dry-run-required" if script.dry_run_required else ""
+                last = f" · last={script.last_returncode}" if script.last_returncode is not None else ""
+                print(f"{script.name}{tags}{source}{dry}{last}{description}")
                 print(f"  {script.path}")
+        elif args.scripts_command == "info":
+            script = get_script(args.name)
+            print(f"Name: {script.name}")
+            print(f"Path: {script.path}")
+            print(f"Source: {script.source}")
+            print(f"Description: {script.description or ''}")
+            print(f"Tags: {', '.join(script.tags)}")
+            print(f"Parameters: {', '.join(script.parameters)}")
+            print(f"Dry-run required: {script.dry_run_required}")
+            print(f"Last run: {script.last_run_at or ''}")
+            print(f"Last return code: {script.last_returncode if script.last_returncode is not None else ''}")
+        elif args.scripts_command == "history":
+            for item in load_script_history(limit=args.limit):
+                print(f"{item.get('timestamp')} {item.get('script')} dry_run={item.get('dry_run')} code={item.get('returncode')}")
         elif args.scripts_command == "path":
             print(get_script(args.name).path)
         elif args.scripts_command == "remove":
@@ -379,9 +472,66 @@ def dispatch(args: argparse.Namespace) -> None:
             print(f"Script retiré : {script.name}")
         elif args.scripts_command == "run":
             dry_run, arguments = script_run_options(args.arguments, dry_run=args.dry_run)
-            result = run_script(args.name, arguments=arguments, dry_run=dry_run)
+            result = run_script(args.name, arguments=arguments, dry_run=dry_run, force=args.force)
             if result.returncode:
                 raise EclipseError(f"Script échoué : {args.name} (code {result.returncode}).")
+        return
+    if args.command in {"automation", "auto"}:
+        if args.automation_command == "add":
+            job = add_job(args.name, every=args.every, command=args.automation_exec, overwrite=args.overwrite)
+            print(f"Automation ajoutée : {job.name} every={job.every} command={' '.join(job.command)}")
+        elif args.automation_command == "list":
+            jobs = load_jobs()
+            if not jobs:
+                print("Aucune automation.")
+            for job in jobs.values():
+                state = "enabled" if job.enabled else "disabled"
+                last = job.last_returncode if job.last_returncode is not None else ""
+                print(f"{job.name} [{state}] every={job.every} last={last}")
+                print(f"  eclipse {' '.join(job.command)}")
+        elif args.automation_command == "run":
+            result = run_job(args.name, dry_run=args.dry_run)
+            if args.dry_run and result.stdout:
+                print(result.stdout)
+            if result.returncode:
+                raise EclipseError(f"Automation échouée : {args.name} (code {result.returncode}).")
+        elif args.automation_command == "run-due":
+            rows = run_due(dry_run=args.dry_run)
+            if not rows:
+                print("Aucune automation due.")
+            for job, result in rows:
+                print(f"{job.name}: code={result.returncode}")
+                if args.dry_run and result.stdout:
+                    print(f"  {result.stdout}")
+        elif args.automation_command == "enable":
+            print(f"Automation activée : {set_enabled(args.name, True).name}")
+        elif args.automation_command == "disable":
+            print(f"Automation désactivée : {set_enabled(args.name, False).name}")
+        elif args.automation_command == "history":
+            for item in load_automation_history(limit=args.limit):
+                print(f"{item.get('timestamp')} {item.get('job')} dry_run={item.get('dry_run')} code={item.get('returncode')}")
+        return
+    if args.command in {"plugins", "plugin"}:
+        if args.plugins_command == "list":
+            plugins = list_plugins()
+            if not plugins:
+                print("Aucun plugin.")
+            for plugin in plugins:
+                state = "enabled" if plugin.enabled else "disabled"
+                print(f"{plugin.name} [{state}] {plugin.description}")
+                print(f"  {plugin.path}")
+        elif args.plugins_command == "create":
+            plugin = create_plugin(args.name, description=args.description)
+            print(f"Plugin créé : {plugin.name} → {plugin.path}")
+        return
+    if args.command == "recovery":
+        if args.recovery_command == "snapshot":
+            print(f"Snapshot : {snapshot(args.destination)}")
+        elif args.recovery_command == "export":
+            print(f"Export : {archive_snapshot(args.snapshot, args.destination, password=args.password)}")
+        elif args.recovery_command == "restore":
+            print(f"Restore : {restore_snapshot(args.snapshot, args.destination, confirmed=args.yes)}")
+        return
 
 
 def main() -> int:

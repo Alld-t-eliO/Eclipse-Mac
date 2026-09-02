@@ -33,6 +33,10 @@ class LocalScript:
     description: str | None = None
     tags: tuple[str, ...] = ()
     source: str = "registry"
+    parameters: tuple[str, ...] = ()
+    dry_run_required: bool = False
+    last_run_at: str | None = None
+    last_returncode: int | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any], root: Path) -> LocalScript:
@@ -48,6 +52,10 @@ class LocalScript:
             description=str(record["description"]) if record.get("description") else None,
             tags=tuple(str(tag) for tag in tags),
             source="registry",
+            parameters=tuple(str(item) for item in record.get("parameters", []) if isinstance(item, str)),
+            dry_run_required=bool(record.get("dry_run_required", False)),
+            last_run_at=str(record["last_run_at"]) if record.get("last_run_at") else None,
+            last_returncode=int(record["last_returncode"]) if record.get("last_returncode") is not None else None,
         )
 
     def to_record(self, root: Path) -> dict[str, Any]:
@@ -57,6 +65,10 @@ class LocalScript:
             "added_at": self.added_at,
             "description": self.description,
             "tags": list(self.tags),
+            "parameters": list(self.parameters),
+            "dry_run_required": self.dry_run_required,
+            "last_run_at": self.last_run_at,
+            "last_returncode": self.last_returncode,
         }
 
 
@@ -85,6 +97,10 @@ def files_dir(root: Path | None = None) -> Path:
 
 def registry_path(root: Path | None = None) -> Path:
     return (root or default_scripts_home()).expanduser().resolve() / "registry.json"
+
+
+def history_path(root: Path | None = None) -> Path:
+    return (root or default_scripts_home()).expanduser().resolve() / "history.jsonl"
 
 
 def validate_name(name: str) -> str:
@@ -131,6 +147,74 @@ def safe_dropin_name(path: Path, used: set[str]) -> str:
     return validate_name(candidate)
 
 
+def metadata_from_comments(path: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"parameters": [], "tags": []}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[:40]
+    except OSError:
+        return metadata
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("#", "//")):
+            comment = stripped.lstrip("#/").strip()
+        else:
+            continue
+        if comment.lower().startswith("eclipse:"):
+            comment = comment.split(":", 1)[1].strip()
+        lowered = comment.lower()
+        if lowered.startswith("description:"):
+            metadata["description"] = comment.split(":", 1)[1].strip()
+        elif lowered.startswith("tags:"):
+            metadata["tags"].extend(item.strip() for item in comment.split(":", 1)[1].split(","))
+        elif lowered.startswith("param:") or lowered.startswith("parameter:"):
+            metadata["parameters"].append(comment.split(":", 1)[1].strip())
+        elif lowered == "dry-run-required: true":
+            metadata["dry_run_required"] = True
+    return metadata
+
+
+def append_history(script: LocalScript, returncode: int, *, dry_run: bool, root: Path | None = None) -> None:
+    path = history_path(root)
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "script": script.name,
+        "path": str(script.path),
+        "source": script.source,
+        "dry_run": dry_run,
+        "returncode": returncode,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def load_history(root: Path | None = None, *, limit: int = 20) -> list[dict[str, Any]]:
+    path = history_path(root)
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows[-limit:]
+
+
+def last_status(name: str, root: Path | None = None) -> tuple[str | None, int | None]:
+    for item in reversed(load_history(root, limit=1000)):
+        if item.get("script") == name:
+            code = item.get("returncode")
+            return str(item.get("timestamp")) if item.get("timestamp") else None, int(code) if code is not None else None
+    return None, None
+
+
 def load_registered_scripts(root: Path | None = None) -> dict[str, LocalScript]:
     home = (root or default_scripts_home()).expanduser().resolve()
     path = registry_path(home)
@@ -148,6 +232,20 @@ def load_registered_scripts(root: Path | None = None) -> dict[str, LocalScript]:
             continue
         script = LocalScript.from_record(item, home)
         if script.name:
+            last_run_at, last_returncode = last_status(script.name, home)
+            if last_run_at:
+                script = LocalScript(
+                    script.name,
+                    script.path,
+                    script.added_at,
+                    script.description,
+                    script.tags,
+                    script.source,
+                    script.parameters,
+                    script.dry_run_required,
+                    last_run_at,
+                    last_returncode,
+                )
             scripts[script.name] = script
     return scripts
 
@@ -165,6 +263,8 @@ def load_dropin_scripts(directory: Path | None = None, *, used_names: set[str] |
             continue
         name = safe_dropin_name(path, used)
         used.add(name)
+        metadata = metadata_from_comments(path)
+        last_run_at, last_returncode = last_status(name)
         try:
             added_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
         except OSError:
@@ -173,9 +273,13 @@ def load_dropin_scripts(directory: Path | None = None, *, used_names: set[str] |
             name=name,
             path=path,
             added_at=added_at,
-            description="Drop-in script",
-            tags=("drop-in",),
+            description=str(metadata.get("description") or "Drop-in script"),
+            tags=normalize_tags([*metadata.get("tags", []), "drop-in"]),
             source="drop-in",
+            parameters=tuple(str(item) for item in metadata.get("parameters", [])),
+            dry_run_required=bool(metadata.get("dry_run_required", False)),
+            last_run_at=last_run_at,
+            last_returncode=last_returncode,
         )
     return scripts
 
@@ -215,6 +319,7 @@ def add_script(
     tags: Iterable[str] = (),
     root: Path | None = None,
     overwrite: bool = False,
+    dry_run_required: bool = False,
 ) -> LocalScript:
     clean_name = validate_name(name)
     source_path = source.expanduser().resolve()
@@ -232,12 +337,15 @@ def add_script(
         target.chmod(0o700)
     except OSError as error:
         raise EclipseError(f"Impossible de copier le script : {error}") from error
+    metadata = metadata_from_comments(source_path)
     script = LocalScript(
         name=clean_name,
         path=target,
         added_at=datetime.now(timezone.utc).isoformat(),
-        description=description.strip() if description and description.strip() else None,
-        tags=normalize_tags(tags),
+        description=description.strip() if description and description.strip() else metadata.get("description"),
+        tags=normalize_tags([*tags, *metadata.get("tags", [])]),
+        parameters=tuple(str(item) for item in metadata.get("parameters", [])),
+        dry_run_required=dry_run_required or bool(metadata.get("dry_run_required", False)),
     )
     scripts[clean_name] = script
     save_scripts(scripts, home)
@@ -286,16 +394,38 @@ def run_script(
     arguments: list[str] | None = None,
     root: Path | None = None,
     dry_run: bool = False,
+    force: bool = False,
 ) -> Result:
     script = get_script(name, root=root)
+    if script.dry_run_required and not dry_run and not force:
+        raise EclipseError(f"Dry-run obligatoire pour ce script : {script.name}. Ajoute --dry-run ou --force.")
     command = command_for(script, arguments or [])
     if dry_run:
         print(shell_display(command))
+        append_history(script, 0, dry_run=True, root=root)
         return Result(0, "", "")
     try:
         completed = subprocess.run(command, check=False, text=True)
     except OSError as error:
         record("local-script", success=False, details={"script": script.name, "error": str(error)})
         raise EclipseError(f"Impossible de lancer le script : {error}") from error
+    append_history(script, completed.returncode, dry_run=False, root=root)
+    if script.source == "registry":
+        scripts = load_registered_scripts(root)
+        if script.name in scripts:
+            current = scripts[script.name]
+            scripts[script.name] = LocalScript(
+                current.name,
+                current.path,
+                current.added_at,
+                current.description,
+                current.tags,
+                current.source,
+                current.parameters,
+                current.dry_run_required,
+                datetime.now(timezone.utc).isoformat(),
+                completed.returncode,
+            )
+            save_scripts(scripts, root)
     record("local-script", success=completed.returncode == 0, details={"script": script.name, "code": completed.returncode})
     return Result(completed.returncode, "", "")

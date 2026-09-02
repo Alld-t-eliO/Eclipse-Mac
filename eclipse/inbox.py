@@ -425,6 +425,13 @@ def search_entries(
     query: str | None = None,
     *,
     name: str | None = None,
+    content: str | None = None,
+    extension: str | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: str | None = None,
+    modified_before: str | None = None,
+    ignore: Iterable[str] = (),
     max_depth: int = 4,
     limit: int = 50,
     include_hidden: bool = False,
@@ -434,6 +441,10 @@ def search_entries(
         raise EclipseError(f"Ce chemin local n'est pas un dossier : {base}")
     results: list[FileEntry] = []
     query_text = (query or "").lower()
+    content_text = (content or "").lower()
+    after = datetime.fromisoformat(modified_after).timestamp() if modified_after else None
+    before = datetime.fromisoformat(modified_before).timestamp() if modified_before else None
+    extension_filter = extension.lower().lstrip(".") if extension else None
     for path in base.rglob("*"):
         try:
             relative = path.relative_to(base)
@@ -441,19 +452,62 @@ def search_entries(
             continue
         if len(relative.parts) > max_depth:
             continue
+        if any(fnmatch(part, pattern) or fnmatch(str(relative), pattern) for pattern in ignore for part in relative.parts):
+            continue
         if not include_hidden and any(part.startswith(".") for part in relative.parts):
             continue
         if name and not fnmatch(path.name, name):
             continue
+        if extension_filter and path.suffix.lower().lstrip(".") != extension_filter:
+            continue
         if query_text and query_text not in path.name.lower():
             continue
         try:
+            stat = path.stat()
+            if min_size is not None and stat.st_size < min_size:
+                continue
+            if max_size is not None and stat.st_size > max_size:
+                continue
+            if after is not None and stat.st_mtime < after:
+                continue
+            if before is not None and stat.st_mtime > before:
+                continue
+            if content_text:
+                if not path.is_file():
+                    continue
+                try:
+                    sample = path.read_bytes()[:1_000_000].decode("utf-8", errors="ignore").lower()
+                except OSError:
+                    continue
+                if content_text not in sample:
+                    continue
             results.append(inspect_path(path))
         except OSError:
             continue
         if len(results) >= limit:
             break
     return results
+
+
+def export_entries(entries: list[FileEntry], destination: Path) -> Path:
+    target = destination.expanduser()
+    payload = [
+        {
+            "path": str(entry.path),
+            "name": entry.name,
+            "kind": entry.kind,
+            "size": entry.size,
+            "modified_at": entry.modified_at,
+            "hidden": entry.hidden,
+        }
+        for entry in entries
+    ]
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(__import__("json").dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as error:
+        raise EclipseError(f"Export recherche impossible : {error}") from error
+    return target.resolve()
 
 
 def make_executable(path: Path, *, confirmed: bool = False) -> Path:

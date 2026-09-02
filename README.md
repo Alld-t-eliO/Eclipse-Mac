@@ -42,6 +42,13 @@ eclipse files trash ~/Backups/todo-old.txt --yes
 eclipse files search ~/Documents invoice --name "*.pdf"
 eclipse files preview ~/Documents/config.json
 eclipse files script-add ~/scripts/cleanup.sh cleanup
+eclipse automation add daily-security-scan --every day
+eclipse automation add cleanup-downloads --every week --command scripts run cleanup-downloads
+eclipse automation run-due --dry-run
+eclipse scripts info cleanup
+eclipse scripts history
+eclipse plugins list
+eclipse recovery snapshot
 eclipse admin status
 eclipse security scan --check security --check firewall
 eclipse security scan --json
@@ -97,6 +104,40 @@ used.
 
 Preview supports directories, UTF-8 text, JSON pretty-printing, image metadata
 for common formats, and ZIP archive listings.
+
+Advanced search supports filename, content, extension, size, modification dates,
+ignored folders, depth limits, result limits, and JSON export:
+
+```bash
+eclipse files search ~/Projects config --content database --extension py
+eclipse files search ~/Documents --name "*.pdf" --min-size 10000
+eclipse files search ~/Projects token --ignore .git --ignore node_modules --export ~/Desktop/results.json
+```
+
+## Automations
+
+Eclipse can store local scheduled automations. It does not install a background
+daemon by itself; `run-due` is the command to trigger from the terminal, a
+LaunchAgent, cron, or another local scheduler.
+
+Useful commands:
+
+```bash
+eclipse automation add daily-security-scan --every day
+eclipse automation add cleanup-downloads --every week --command scripts run cleanup-downloads
+eclipse automation list
+eclipse automation run daily-security-scan --dry-run
+eclipse automation run-due
+eclipse automation disable cleanup-downloads
+eclipse automation enable cleanup-downloads
+eclipse automation history
+```
+
+Automation definitions and history are stored privately in:
+
+```text
+~/Library/Application Support/Eclipse/automation
+```
 
 ## Administration And Security
 
@@ -162,8 +203,13 @@ Useful commands:
 
 ```bash
 eclipse scripts add name ~/scripts/tool.py --description "local tool" --tag mac
+eclipse scripts add risky ~/scripts/risky.sh --dry-run-required
 eclipse scripts list
+eclipse scripts info name
+eclipse scripts history
 eclipse scripts run name -- --flag
+eclipse scripts run risky --dry-run
+eclipse scripts run risky --force
 eclipse scripts path name
 eclipse scripts remove name --delete-file
 ```
@@ -173,6 +219,59 @@ default scripts directory:
 
 ```bash
 ECLIPSE_SCRIPTS_HOME=/path/to/scripts eclipse scripts list
+```
+
+Script metadata can be declared in the first comments of a script:
+
+```bash
+# eclipse: description: Clean local build caches
+# eclipse: tags: cleanup, maintenance
+# eclipse: param: --dry-run
+# eclipse: dry-run-required: true
+```
+
+Eclipse reads those comments into the script catalog, displays declared
+parameters, tracks execution history, and records the latest return code.
+
+## Plugins
+
+Eclipse has a lightweight plugin layout so future modules can live outside the
+core package:
+
+```text
+plugins/
+  docker/
+  homebrew/
+  git/
+  network/
+  ai/
+```
+
+Each plugin has a `plugin.json` manifest. Current commands:
+
+```bash
+eclipse plugins list
+eclipse plugins create local-tools --description "Local helper workflows"
+```
+
+## Recovery
+
+Recovery mode snapshots Eclipse's private operational data, including local
+memory, script registry/copies, and the audit log when those files exist.
+
+Useful commands:
+
+```bash
+eclipse recovery snapshot
+eclipse recovery export ~/Library/Application\ Support/Eclipse/recovery/snapshot-YYYYMMDD-HHMMSS
+eclipse recovery export ./snapshot --password "local-passphrase"
+eclipse recovery restore ./snapshot --destination ~/Desktop/eclipse-restore --yes
+```
+
+Snapshots are stored by default in:
+
+```text
+~/Library/Application Support/Eclipse/recovery
 ```
 
 ## Privacy
