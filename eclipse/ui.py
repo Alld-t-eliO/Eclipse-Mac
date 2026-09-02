@@ -26,10 +26,11 @@ from .inbox import (
     write_text,
 )
 from .local_system import LocalStatus, local_status
+from .logs import LOG_SOURCES, collect_logs, export_logs, format_log
 from .memory import add_memory, filter_memories, load_memories, summarize
 from .plugins import list_plugins
 from .recovery import archive_snapshot, snapshot
-from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
+from .security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, password_status, run_checks, write_report
 from .scripts import add_script, load_scripts, run_script
 
 LOGO = r"""
@@ -53,9 +54,15 @@ def human_size(value: object) -> str:
 
 def header(title: str = "CENTRE DE CONTRÔLE MAC") -> None:
     status = local_status()
+    passwords = password_status()
+    password_light = ui.success("● PWD OK") if passwords.changed and not passwords.expired else ui.danger("● PWD À CHANGER")
     ui.clear()
     for index, line in enumerate(LOGO.strip("\n").splitlines()):
-        print(ui.paint(line, ui.CYAN if index < 3 else ui.MAGENTA, bold=True))
+        rendered = ui.paint(line, ui.CYAN if index < 3 else ui.MAGENTA, bold=True)
+        if index == 0:
+            padding = " " * max(2, 78 - ui.visible_length(rendered) - ui.visible_length(password_light))
+            rendered = f"{rendered}{padding}{password_light}"
+        print(rendered)
     print(f"\n  {ui.neon(title, bold=True)}")
     print(f"  {ui.muted('MAC')} {ui.accent(status.hostname)} {ui.muted('· SHELL')} {ui.success(status.shell or 'local')}")
     print(f"  {ui.muted('─' * 54)}\n")
@@ -337,10 +344,17 @@ def security_menu() -> None:
         ("docker", "Docker"),
     )
     while True:
-        header("ADMINISTRATION & SÉCURITÉ")
-        print(ui.menu_line("[1]", "Scan rapide"))
+        header("SÉCURITÉ")
+        status = password_status()
+        light = ui.success("VERT") if status.changed and not status.expired else ui.danger("ROUGE")
+        print(f"  {ui.muted('Mots de passe')} {light}")
+        if status.next_due_at:
+            print(f"  {ui.muted('Prochaine échéance')} {status.next_due_at}")
+        print()
+        print(ui.menu_line("[1]", "Scan sécurité exécutable"))
         print(ui.menu_line("[2]", "Rapport JSON complet"))
-        for index, (_, label) in enumerate(checks, 3):
+        print(ui.menu_line("[3]", "Confirmer changement mots de passe"))
+        for index, (_, label) in enumerate(checks, 4):
             print(ui.menu_line(f"[{index}]", label))
         print(ui.menu_line("[0]", "Retour"), "\n")
         choice = input(ui.prompt()).strip()
@@ -353,8 +367,13 @@ def security_menu() -> None:
         elif choice == "2":
             findings = run_checks(DEFAULT_CHECKS)
             print(f"\n  {ui.success('●')} Rapport : {write_report(findings)}")
-        elif choice.isdigit() and 3 <= int(choice) < 3 + len(checks):
-            check = checks[int(choice) - 3][0]
+        elif choice == "3":
+            answer = input(ui.prompt("As-tu changé tes mots de passe ? [oui/N]")).strip().lower()
+            if answer == "oui":
+                updated = confirm_password_rotation()
+                print(f"\n  {ui.success('●')} Confirmé jusqu'au {updated.next_due_at}")
+        elif choice.isdigit() and 4 <= int(choice) < 4 + len(checks):
+            check = checks[int(choice) - 4][0]
             findings = run_checks((check,))
             print()
             print(format_findings(findings))
@@ -443,6 +462,45 @@ def recovery_menu() -> None:
         pause()
 
 
+def logs_menu() -> None:
+    choices = {
+        "1": ("audit",),
+        "2": ("security",),
+        "3": ("scripts",),
+        "4": ("automation",),
+        "5": ("system",),
+        "6": ("audit", "security", "scripts", "automation"),
+    }
+    while True:
+        header("LOGS // JOURNAUX")
+        print(ui.menu_line("[1]", "Audit Eclipse"))
+        print(ui.menu_line("[2]", "Sécurité"))
+        print(ui.menu_line("[3]", "Scripts utilisés"))
+        print(ui.menu_line("[4]", "Automations"))
+        print(ui.menu_line("[5]", "Système macOS"))
+        print(ui.menu_line("[6]", "Tout Eclipse"))
+        print(ui.menu_line("[export]", "export JSON"))
+        print(ui.menu_line("[0]", "Retour"), "\n")
+        choice = input(ui.prompt()).strip()
+        if choice == "0":
+            return
+        try:
+            if choice in choices:
+                entries = collect_logs(choices[choice], limit=30, include_system=choice == "5")
+                print()
+                print("\n".join(f"  {format_log(entry)}" for entry in entries) if entries else f"  {ui.muted('Aucun log.')}")
+            elif choice == "export":
+                source = input(ui.prompt(f"Source {LOG_SOURCES}")).strip()
+                destination = Path(input(ui.prompt("Destination JSON")).strip())
+                entries = collect_logs((source,), limit=200, include_system=source == "system")
+                print(f"  {ui.success('●')} Export : {export_logs(entries, destination)}")
+            else:
+                print(ui.danger("Choix invalide."))
+        except EclipseError as error:
+            print(ui.danger(f"\n  ✗ {error}"))
+        pause()
+
+
 def launch() -> None:
     ui.boot_animation()
     while True:
@@ -453,10 +511,11 @@ def launch() -> None:
             ui.menu_line("[2]", "Fichiers locaux"),
             ui.menu_line("[3]", "Mémoire locale"),
             ui.menu_line("[4]", "Scripts locaux"),
-            ui.menu_line("[5]", "Administration & sécurité"),
+            ui.menu_line("[5]", "Sécurité"),
             ui.menu_line("[6]", "Automations"),
             ui.menu_line("[7]", "Plugins"),
             ui.menu_line("[8]", "Recovery"),
+            ui.menu_line("[9]", "Logs"),
             ui.menu_line("[0]", "Quitter", danger_action=True),
         ]
         ui.columns(menu, local_panel(status))
@@ -474,6 +533,7 @@ def launch() -> None:
             "6": automation_menu,
             "7": plugins_menu,
             "8": recovery_menu,
+            "9": logs_menu,
         }
         action = actions.get(choice)
         if action is None:

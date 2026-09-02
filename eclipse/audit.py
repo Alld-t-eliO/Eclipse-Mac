@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import getpass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ def record(event: str, *, success: bool, details: dict[str, Any] | None = None) 
     path = default_log_path()
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user": getpass.getuser(),
         "event": event,
         "success": success,
         "details": details or {},
@@ -26,4 +28,3 @@ def record(event: str, *, success: bool, details: dict[str, Any] | None = None) 
     except OSError:
         # Une panne de journalisation ne doit pas masquer le résultat de l'opération.
         pass
-

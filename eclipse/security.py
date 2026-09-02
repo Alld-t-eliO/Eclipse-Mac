@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import re
 import shutil
 import stat
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -17,6 +18,7 @@ from .errors import EclipseError
 LEVEL_ORDER = {"OK": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
 SUSPICIOUS_PLIST = re.compile(r"curl|wget|nc |netcat|base64|osascript|python|perl|ruby|chmod \+x|/tmp/|/var/tmp/", re.I)
 DEFAULT_CHECKS = ("security", "firewall", "sharing", "network", "persistence", "services", "updates", "filesystem", "processes", "docker")
+PASSWORD_ROTATION_DAYS = 183
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,66 @@ class Finding:
             "detail": self.detail,
             "remediation": self.remediation,
         }
+
+
+@dataclass(frozen=True)
+class PasswordStatus:
+    changed: bool
+    expired: bool
+    last_confirmed_at: str | None
+    user: str
+    next_due_at: str | None
+
+
+def default_security_state_path() -> Path:
+    override = os.environ.get("ECLIPSE_SECURITY_STATE_PATH")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Library" / "Application Support" / "Eclipse" / "security-state.json"
+
+
+def password_status(path: Path | None = None, *, now: datetime | None = None) -> PasswordStatus:
+    state_path = path or default_security_state_path()
+    user = getpass.getuser()
+    if not state_path.exists():
+        return PasswordStatus(False, True, None, user, None)
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return PasswordStatus(False, True, None, user, None)
+    confirmed = data.get("passwords_changed_at")
+    if not confirmed:
+        return PasswordStatus(False, True, None, str(data.get("user") or user), None)
+    try:
+        confirmed_at = datetime.fromisoformat(str(confirmed))
+    except ValueError:
+        return PasswordStatus(False, True, None, str(data.get("user") or user), None)
+    due_at = confirmed_at + timedelta(days=PASSWORD_ROTATION_DAYS)
+    current = now or datetime.now(timezone.utc)
+    return PasswordStatus(True, current >= due_at, confirmed_at.isoformat(), str(data.get("user") or user), due_at.isoformat())
+
+
+def confirm_password_rotation(path: Path | None = None, *, user: str | None = None) -> PasswordStatus:
+    state_path = path or default_security_state_path()
+    payload = {
+        "passwords_changed_at": datetime.now(timezone.utc).isoformat(),
+        "user": user or getpass.getuser(),
+    }
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        state_path.chmod(0o600)
+    except OSError as error:
+        raise EclipseError(f"Impossible d'écrire l'état sécurité : {error}") from error
+    return password_status(state_path)
+
+
+def format_password_status(status: PasswordStatus) -> str:
+    if not status.changed:
+        return "Mots de passe : à confirmer (rouge)"
+    if status.expired:
+        return f"Mots de passe : à renouveler depuis {status.next_due_at} (rouge)"
+    return f"Mots de passe : OK jusqu'au {status.next_due_at} (vert)"
 
 
 def run_text(command: list[str], *, timeout: int = 10) -> tuple[int, str, str]:
@@ -287,6 +349,7 @@ def write_report(findings: list[Finding], destination: Path | None = None) -> Pa
     path = root / f"security-{stamp}.json"
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "user": getpass.getuser(),
         "score": security_score(findings),
         "summary": summary(findings),
         "findings": [item.to_record() for item in findings],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import re
 import shutil
@@ -177,6 +178,7 @@ def append_history(script: LocalScript, returncode: int, *, dry_run: bool, root:
     path = history_path(root)
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user": getpass.getuser(),
         "script": script.name,
         "path": str(script.path),
         "source": script.source,

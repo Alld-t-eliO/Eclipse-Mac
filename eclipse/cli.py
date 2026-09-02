@@ -28,10 +28,11 @@ from .inbox import (
     write_text,
 )
 from .local_system import common_folders, local_status
+from .logs import LOG_SOURCES, collect_logs, export_logs, format_log
 from .memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
 from .plugins import create_plugin, list_plugins
 from .recovery import archive_snapshot, restore_snapshot, snapshot
-from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
+from .security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, format_password_status, password_status, run_checks, write_report
 from .scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
 from .ui import launch
 
@@ -152,6 +153,10 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--deep", action="store_true", help="lancer les checks plus longs")
     item.add_argument("--json", action="store_true", help="écrire un rapport JSON privé")
     item.add_argument("--output-dir", type=Path, help="dossier des rapports JSON")
+    password = security_commands.add_parser("password", help="suivre la rotation des mots de passe")
+    password_commands = password.add_subparsers(dest="password_command", required=True)
+    password_commands.add_parser("status", help="afficher l'état de rotation")
+    password_commands.add_parser("confirm", help="confirmer que les mots de passe ont été changés")
 
     admin = commands.add_parser("admin", help="administrer l'état local du Mac")
     admin_commands = admin.add_subparsers(dest="admin_command", required=True)
@@ -256,6 +261,18 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("snapshot", type=Path)
     item.add_argument("--destination", type=Path)
     item.add_argument("--yes", action="store_true")
+
+    logs = commands.add_parser("logs", aliases=["log"], help="consulter les journaux Eclipse et macOS")
+    logs_commands = logs.add_subparsers(dest="logs_command", required=True)
+    item = logs_commands.add_parser("list", help="lister les logs")
+    item.add_argument("--source", action="append", choices=LOG_SOURCES, help="source répétable: audit, scripts, automation, security, system")
+    item.add_argument("--limit", type=int, default=50)
+    item.add_argument("--user", help="filtrer par utilisateur")
+    item.add_argument("--query", help="chercher dans les logs")
+    item.add_argument("--since", help="date ISO minimale")
+    item.add_argument("--until", help="date ISO maximale")
+    item.add_argument("--system", action="store_true", help="inclure les logs système macOS")
+    item.add_argument("--export", type=Path, help="exporter en JSON")
     return root
 
 
@@ -394,6 +411,11 @@ def dispatch(args: argparse.Namespace) -> None:
             print(format_findings(findings))
             if args.json:
                 print(f"\nRapport : {write_report(findings, args.output_dir)}")
+        elif args.security_command == "password":
+            if args.password_command == "status":
+                print(format_password_status(password_status()))
+            elif args.password_command == "confirm":
+                print(format_password_status(confirm_password_rotation()))
         return
     if args.command == "admin":
         if args.admin_command == "status":
@@ -531,6 +553,21 @@ def dispatch(args: argparse.Namespace) -> None:
             print(f"Export : {archive_snapshot(args.snapshot, args.destination, password=args.password)}")
         elif args.recovery_command == "restore":
             print(f"Restore : {restore_snapshot(args.snapshot, args.destination, confirmed=args.yes)}")
+        return
+    if args.command in {"logs", "log"}:
+        if args.logs_command == "list":
+            entries = collect_logs(
+                args.source,
+                limit=args.limit,
+                user=args.user,
+                query=args.query,
+                since=args.since,
+                until=args.until,
+                include_system=args.system,
+            )
+            print("\n".join(format_log(entry) for entry in entries) or "Aucun log.")
+            if args.export:
+                print(f"Export : {export_logs(entries, args.export)}")
         return
 
 

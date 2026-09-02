@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import subprocess
 import sys
@@ -167,6 +168,7 @@ def append_history(job: AutomationJob, result: Result, *, dry_run: bool, root: P
     path = history_path(root)
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user": getpass.getuser(),
         "job": job.name,
         "command": list(job.command),
         "dry_run": dry_run,
