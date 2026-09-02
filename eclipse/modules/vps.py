@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from eclipse.system.errors import EclipseError
+
+HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+USER_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+REMOTE_PATH_RE = re.compile(r"^[A-Za-z0-9_./~@%+=:,-]+$")
 
 
 @dataclass(frozen=True)
@@ -33,13 +38,11 @@ def validate_remote(host: str, remote_path: str, user: str | None = None) -> tup
     clean_host = host.strip()
     clean_user = (user or "").strip()
     clean_path = remote_path.strip()
-    if not clean_host or any(character.isspace() for character in clean_host):
+    if not clean_host or not HOST_RE.fullmatch(clean_host):
         raise EclipseError("Invalid VPS host.")
-    if clean_user and any(character.isspace() for character in clean_user):
+    if clean_user and not USER_RE.fullmatch(clean_user):
         raise EclipseError("Invalid VPS user.")
-    if not clean_path or "\x00" in clean_path or any(character.isspace() for character in clean_path):
-        raise EclipseError("Invalid VPS remote path.")
-    if any(character in clean_path for character in (";", "&", "|", "`", "$", "<", ">")):
+    if not clean_path or not REMOTE_PATH_RE.fullmatch(clean_path):
         raise EclipseError("Invalid VPS remote path.")
     login = f"{clean_user}@{clean_host}" if clean_user else clean_host
     return login, clean_path

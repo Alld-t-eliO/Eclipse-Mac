@@ -32,7 +32,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$DMG" && -f "$DMG" ]] || { printf '%s\n' "DMG file not found." >&2; exit 1; }
-[[ "${DMG##*.}" = "dmg" ]] || { printf '%s\n' "File does not use the .dmg extension." >&2; exit 2; }
+extension="$(printf '%s' "${DMG##*.}" | tr '[:upper:]' '[:lower:]')"
+[[ "$extension" = "dmg" ]] || { printf '%s\n' "File does not use the .dmg extension." >&2; exit 2; }
 
 printf 'File: %s\n' "$DMG"
 printf 'Size: %s bytes\n' "$(stat -f '%z' "$DMG")"

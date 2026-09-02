@@ -34,6 +34,6 @@ while IFS= read -r -d '' file; do
     printf '%s\n' "$file"
     printf '  quarantine: %s\n' "$quarantine"
   fi
-done < <(find "$FOLDER" -type f -maxdepth 2 -print0)
+done < <(find "$FOLDER" -maxdepth 2 -type f -print0)
 
 [[ "$found" -eq 1 ]] || printf '%s\n' "No quarantined download found."

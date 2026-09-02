@@ -42,21 +42,15 @@ SOURCES=(
   ".local/state/eclipse"
 )
 
-if [[ -d "${PROJECT_ROOT}/scripts" ]]; then
-  SOURCES+=("${PROJECT_ROOT}/scripts")
-fi
-if [[ -d "${PROJECT_ROOT}/eclipse/modules/scripts" ]]; then
-  SOURCES+=("${PROJECT_ROOT}/eclipse/modules/scripts")
-fi
+PROJECT_SCRIPTS="${PROJECT_ROOT}/scripts"
+PACKAGED_SCRIPTS="${PROJECT_ROOT}/eclipse/modules/scripts"
 
 EXISTING=()
 for source in "${SOURCES[@]}"; do
-  if [[ "$source" = /* ]]; then
-    [[ -e "$source" ]] && EXISTING+=("$source")
-  else
-    [[ -e "${HOME}/${source}" ]] && EXISTING+=("$source")
-  fi
+  [[ -e "${HOME}/${source}" ]] && EXISTING+=("$source")
 done
+[[ -d "$PROJECT_SCRIPTS" ]] && EXISTING+=("$PROJECT_SCRIPTS")
+[[ -d "$PACKAGED_SCRIPTS" ]] && EXISTING+=("$PACKAGED_SCRIPTS")
 
 printf 'Backup destination: %s\n' "$ARCHIVE"
 printf '%s\n' "Sources:"
@@ -68,6 +62,32 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 mkdir -p "$DESTINATION"
-tar -czf "$ARCHIVE" -C "$HOME" "${EXISTING[@]}"
+STAGING="$(mktemp -d)"
+cleanup() {
+  rm -rf "$STAGING"
+}
+trap cleanup EXIT
+
+for source in "${EXISTING[@]}"; do
+  if [[ "$source" = /* ]]; then
+    target="${STAGING}/project/${source#/}"
+    mkdir -p "$(dirname "$target")"
+    if [[ -d "$source" ]]; then
+      ditto "$source" "$target"
+    else
+      cp -p "$source" "$target"
+    fi
+  else
+    target="${STAGING}/home/${source}"
+    mkdir -p "$(dirname "$target")"
+    if [[ -d "${HOME}/${source}" ]]; then
+      ditto "${HOME}/${source}" "$target"
+    else
+      cp -p "${HOME}/${source}" "$target"
+    fi
+  fi
+done
+
+tar -czf "$ARCHIVE" -C "$STAGING" .
 chmod 600 "$ARCHIVE"
 printf 'Backup created: %s\n' "$ARCHIVE"

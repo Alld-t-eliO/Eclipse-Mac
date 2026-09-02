@@ -5,6 +5,10 @@ browse common user folders, store local notes, run personal scripts, and review
 basic administration and security signals from either an interactive terminal UI
 or the command line.
 
+## Preview
+
+![Eclipse terminal control center](docs/images/eclipse-control-center.png)
+
 ## Features
 
 - Local Mac dashboard: macOS version, CPU, memory, disk usage, shell, and home
@@ -13,18 +17,90 @@ or the command line.
   Music.
 - Local JSONL memory for notes, decisions, tags, projects, and exports.
 - Personal script registry with private copies and local execution.
+- Packaged macOS maintenance scripts for backup, restore, cleanup, quarantine
+  audit, DMG inspection, and local secret checks.
+- Mac-to-VPS file and folder upload through SSH/rsync with dry-run support.
 - macOS administration and security checks for FileVault, Gatekeeper, SIP,
   firewall, sharing, network state, persistence, services, updates, filesystem
   permissions, processes, and Docker.
 - Private JSONL audit log at `~/.local/state/eclipse/audit.jsonl`.
 
-## Local Installation
+## Installation
+
+Requirements:
+
+- macOS
+- Python 3.11 or newer
+- `rsync` and `ssh` for VPS transfers
+
+Recommended user install from a wheel:
+
+```bash
+python3 -m venv ~/.local/share/eclipse-venv
+~/.local/share/eclipse-venv/bin/python -m pip install --upgrade pip
+~/.local/share/eclipse-venv/bin/python -m pip install /path/to/eclipse_mac-0.3.0-py3-none-any.whl
+~/.local/share/eclipse-venv/bin/eclipse ui
+```
+
+Alternative install from a source archive:
+
+```bash
+python3 -m venv ~/.local/share/eclipse-venv
+~/.local/share/eclipse-venv/bin/python -m pip install --upgrade pip
+~/.local/share/eclipse-venv/bin/python -m pip install /path/to/eclipse_mac-0.3.0.tar.gz
+~/.local/share/eclipse-venv/bin/eclipse ui
+```
+
+Expose the `eclipse` command in future terminals:
+
+```bash
+printf '\nexport PATH="$HOME/.local/share/eclipse-venv/bin:$PATH"\n' >> ~/.zprofile
+source ~/.zprofile
+```
+
+Verify the installation:
+
+```bash
+eclipse --version
+eclipse scripts info backup-eclipse-data
+eclipse vps upload --help
+```
+
+Update an existing installation:
+
+```bash
+~/.local/share/eclipse-venv/bin/python -m pip install --upgrade /path/to/eclipse_mac-0.3.0-py3-none-any.whl
+```
+
+Uninstall:
+
+```bash
+~/.local/share/eclipse-venv/bin/python -m pip uninstall eclipse-mac
+```
+
+Developer install from a local checkout:
 
 ```bash
 cd ~/Eclipse
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
+
+Build distributable archives from the project root:
+
+```bash
+python3 -m pip install build
+python3 -m build
+```
+
+The generated files are written to `dist/`. Current artifacts:
+
+```text
+dist/eclipse_mac-0.3.0-py3-none-any.whl
+dist/eclipse_mac-0.3.0.tar.gz
+```
+
+The packaged shell scripts and plugin manifests are included in both artifacts.
 
 ## Usage
 
@@ -49,6 +125,11 @@ eclipse scripts info cleanup
 eclipse scripts history
 eclipse plugins list
 eclipse recovery snapshot
+eclipse logs list --source scripts --limit 20
+eclipse logs list --source audit --source security --query file-write
+eclipse logs list --system --limit 20
+eclipse security password status
+eclipse security password confirm
 eclipse admin status
 eclipse security scan --check security --check firewall
 eclipse security scan --json
@@ -61,6 +142,8 @@ eclipse scripts add cleanup ~/scripts/cleanup.sh --tag maintenance
 eclipse scripts list
 eclipse scripts run cleanup --dry-run -- --verbose
 eclipse scripts run cleanup -- --verbose
+eclipse vps upload ~/Documents/report.pdf --host 203.0.113.10 --user deploy --remote-path /srv/uploads --dry-run
+eclipse vps upload ~/Projects/site --host example.com --remote-path /var/www/site
 ```
 
 `eclipse ui` opens the interactive terminal control center. The first screen
@@ -139,29 +222,79 @@ Automation definitions and history are stored privately in:
 ~/Library/Application Support/Eclipse/automation
 ```
 
+## Logs
+
+Eclipse includes a `logs` category that centralizes local activity logs with the
+date, time, user, source, action, status, and details for each entry.
+
+Supported sources:
+
+- `audit`: Eclipse actions such as file writes, moves, backups, recovery, and
+  automations.
+- `scripts`: personal script execution history.
+- `automation`: scheduled automation execution history.
+- `security`: generated security reports.
+- `system`: recent macOS system logs, queried on demand.
+
+Useful commands:
+
+```bash
+eclipse logs list
+eclipse logs list --source scripts --limit 20
+eclipse logs list --source audit --source security --query firewall
+eclipse logs list --user "$USER" --since 2026-09-01
+eclipse logs list --system --limit 20
+eclipse logs list --export ~/Desktop/eclipse-logs.json
+```
+
+`system` logs are read from macOS only when requested with `--system` or
+`--source system`. Eclipse does not store system logs permanently by default.
+
 ## Administration And Security
 
-The security module is based on the original local Bash scanner, but it is
-integrated directly into Eclipse and remains read-only. JSON reports are written
-by default to:
+The `security` category contains Eclipse's local macOS security features. The
+main executable action is the security scan:
+
+```bash
+eclipse security scan
+eclipse security scan --deep
+eclipse security scan --check security --check firewall
+eclipse security scan --json
+```
+
+The scanner is based on the original local Bash scanner, but it is integrated
+directly into Eclipse and remains read-only. JSON reports are written by default
+to:
 
 ```text
 ~/Library/Application Support/Eclipse/security-reports
 ```
 
+`--deep` enables slower checks, including the macOS update lookup through
+`softwareupdate -l`.
+
+Eclipse also tracks password rotation. The UI header shows a password indicator
+in the upper right:
+
+- red by default when password rotation has not been confirmed;
+- green after the user confirms passwords have been changed;
+- red again after 6 months.
+
 Useful commands:
 
 ```bash
+eclipse security password status
+eclipse security password confirm
 eclipse admin status
 eclipse admin report
-eclipse security scan
-eclipse security scan --deep
-eclipse security scan --check security --check firewall
 eclipse security scan --json --output-dir ~/Backups/eclipse-security
 ```
 
-`--deep` enables slower checks, including the macOS update lookup through
-`softwareupdate -l`.
+The password rotation state is stored privately in:
+
+```text
+~/Library/Application Support/Eclipse/security-state.json
+```
 
 ## Local Memory
 
@@ -232,6 +365,50 @@ Script metadata can be declared in the first comments of a script:
 
 Eclipse reads those comments into the script catalog, displays declared
 parameters, tracks execution history, and records the latest return code.
+
+Packaged scripts:
+
+- `daily-maintenance`: runs the security scan, light cleanup checks, and a
+  summary report.
+- `backup-eclipse-data`: backs up Eclipse data, scripts, logs, memory, recovery,
+  plugins, and selected config files.
+- `restore-eclipse-data`: guides a restore from an Eclipse backup.
+- `rotate-local-backups`: keeps the latest backups and removes older ones.
+- `quarantine-downloads-audit`: lists downloaded files with macOS quarantine
+  metadata.
+- `safe-open-dmg`: inspects a DMG before opening it.
+- `project-clean-cache`: removes common development caches from a project.
+- `find-secrets-local`: searches for likely local secrets without printing them
+  in clear text.
+- `verify-backup`: checks that a `.tar.gz` backup is readable.
+- `user-system-backup`: creates a local user system backup on the Desktop.
+
+Examples:
+
+```bash
+eclipse scripts info daily-maintenance
+eclipse scripts run daily-maintenance --force -- --dry-run
+eclipse scripts run backup-eclipse-data --force -- --dry-run
+eclipse scripts run safe-open-dmg --force -- --file ~/Downloads/app.dmg
+```
+
+## VPS Transfers
+
+The `vps` category manages workflows between the local Mac and a remote VPS.
+The first available workflow uploads a local file or folder through `rsync`
+over SSH.
+
+Useful commands:
+
+```bash
+eclipse vps upload ~/Documents/report.pdf --host 203.0.113.10 --user deploy --remote-path /srv/uploads --dry-run
+eclipse vps upload ~/Projects/site --host example.com --remote-path /var/www/site --identity ~/.ssh/id_ed25519
+eclipse vps upload ~/Backups/eclipse.tar.gz --host example.com --port 2222 --remote-path /home/deploy/backups
+```
+
+`--dry-run` asks `rsync` to show what would be transferred before writing to the
+VPS. The command validates the local source, SSH port, identity file, host, user,
+and remote path before starting the transfer.
 
 ## Plugins
 
