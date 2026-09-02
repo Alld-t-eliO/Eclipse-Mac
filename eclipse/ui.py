@@ -5,11 +5,29 @@ from pathlib import Path
 
 from . import style as ui
 from .errors import EclipseError
-from .inbox import copy_path, format_entry, list_entries, make_directory, move_path, open_path, read_text, rename_path, trash_path, write_text
+from .inbox import (
+    copy_path,
+    edit_line,
+    favorites,
+    file_info,
+    format_entry,
+    is_protected_path,
+    list_entries,
+    make_directory,
+    make_executable,
+    move_path,
+    open_path,
+    preview_path,
+    read_text,
+    rename_path,
+    search_entries,
+    trash_path,
+    write_text,
+)
 from .local_system import LocalStatus, local_status
 from .memory import add_memory, filter_memories, load_memories, summarize
 from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
-from .scripts import load_scripts, run_script
+from .scripts import add_script, load_scripts, run_script
 
 LOGO = r"""
     ______     __  _
@@ -83,15 +101,21 @@ def local_files_menu() -> None:
             print(f"  {ui.muted('Aucun fichier visible.')}")
         print()
         print(ui.menu_line("[cd]", "aller à un chemin"))
+        print(ui.menu_line("[fav]", "emplacements rapides"))
         print(ui.menu_line("[..]", "dossier parent"))
-        print(ui.menu_line("[cat]", "aperçu fichier texte"))
+        print(ui.menu_line("[view]", "prévisualiser"))
+        print(ui.menu_line("[info]", "infos et permissions"))
+        print(ui.menu_line("[search]", "rechercher"))
         print(ui.menu_line("[new]", "créer fichier texte"))
+        print(ui.menu_line("[edit]", "remplacer une ligne"))
         print(ui.menu_line("[mkdir]", "créer dossier"))
         print(ui.menu_line("[ren]", "renommer"))
         print(ui.menu_line("[cp]", "copier"))
         print(ui.menu_line("[mv]", "déplacer"))
         print(ui.menu_line("[trash]", "envoyer à la Corbeille"))
         print(ui.menu_line("[open]", "ouvrir avec macOS"))
+        print(ui.menu_line("[chmod]", "rendre exécutable"))
+        print(ui.menu_line("[script]", "ajouter aux scripts Eclipse"))
         print(ui.menu_line("[0]", "Retour"), "\n")
         choice = input(ui.prompt("Action ou numéro")).strip()
         if choice == "0":
@@ -105,33 +129,76 @@ def local_files_menu() -> None:
                     current = selected.path
                 else:
                     print()
-                    print(read_text(selected.path, max_bytes=12000))
+                    preview = preview_path(selected.path, max_bytes=12000)
+                    print("\n".join(f"  {line}" for line in preview.details))
+                    if preview.content is not None:
+                        print()
+                        print(preview.content)
                     pause()
             elif choice == "cd":
                 current = Path(input(ui.prompt("Chemin")).strip() or str(current))
-            elif choice == "cat":
-                path = Path(input(ui.prompt("Fichier")).strip())
+            elif choice == "fav":
+                shortcuts = list(favorites().items())
+                print()
+                for index, (name, path) in enumerate(shortcuts, 1):
+                    print(ui.menu_line(f"[{index}]", f"{name}: {path}"))
+                selected = input(ui.prompt("Favori")).strip()
+                if selected.isdigit() and 1 <= int(selected) <= len(shortcuts):
+                    current = shortcuts[int(selected) - 1][1]
+            elif choice == "view":
+                path = Path(input(ui.prompt("Chemin")).strip() or str(current))
+                target = path if path.is_absolute() else current / path
+                preview = preview_path(target, max_bytes=12000)
+                print()
+                print("\n".join(f"  {line}" for line in preview.details))
+                if preview.content is not None:
+                    print()
+                    print(preview.content)
+                pause()
+            elif choice == "info":
+                path = Path(input(ui.prompt("Chemin")).strip() or str(current))
                 target = path if path.is_absolute() else current / path
                 print()
-                print(read_text(target, max_bytes=12000))
+                print("\n".join(f"  {line}" for line in file_info(target)))
+                pause()
+            elif choice == "search":
+                query = input(ui.prompt("Recherche")).strip()
+                pattern = input(ui.prompt("Motif optionnel (*.py)")).strip()
+                results = search_entries(current, query or None, name=pattern or None, max_depth=5, limit=40)
+                print()
+                if not results:
+                    print(f"  {ui.muted('Aucun résultat.')}")
+                for entry in results:
+                    print(f"  {entry.path} ({entry.kind})")
                 pause()
             elif choice == "new":
                 path = Path(input(ui.prompt("Fichier")).strip())
                 target = path if path.is_absolute() else current / path
                 text = input(ui.prompt("Texte")).strip()
                 overwrite = input(ui.prompt("Écraser si existe [oui/N]")).strip().lower() == "oui"
-                print(f"  {ui.success('●')} Fichier écrit : {write_text(target, text, overwrite=overwrite)}")
+                confirmed = not is_protected_path(target) or input(ui.prompt("Chemin protégé, confirmer [oui/N]")).strip().lower() == "oui"
+                print(f"  {ui.success('●')} Fichier écrit : {write_text(target, text, overwrite=overwrite, confirmed=confirmed)}")
+                pause()
+            elif choice == "edit":
+                path = Path(input(ui.prompt("Fichier")).strip())
+                target = path if path.is_absolute() else current / path
+                line = int(input(ui.prompt("Ligne")).strip())
+                text = input(ui.prompt("Nouveau texte")).strip()
+                confirmed = not is_protected_path(target) or input(ui.prompt("Chemin protégé, confirmer [oui/N]")).strip().lower() == "oui"
+                print(f"  {ui.success('●')} Fichier édité : {edit_line(target, line, text, confirmed=confirmed)}")
                 pause()
             elif choice == "mkdir":
                 path = Path(input(ui.prompt("Dossier")).strip())
                 target = path if path.is_absolute() else current / path
-                print(f"  {ui.success('●')} Dossier créé : {make_directory(target)}")
+                confirmed = not is_protected_path(target) or input(ui.prompt("Chemin protégé, confirmer [oui/N]")).strip().lower() == "oui"
+                print(f"  {ui.success('●')} Dossier créé : {make_directory(target, confirmed=confirmed)}")
                 pause()
             elif choice == "ren":
                 path = Path(input(ui.prompt("Chemin")).strip())
                 target = path if path.is_absolute() else current / path
                 name = input(ui.prompt("Nouveau nom")).strip()
-                print(f"  {ui.success('●')} Renommage : {rename_path(target, name)}")
+                confirmed = not is_protected_path(target) or input(ui.prompt("Chemin protégé, confirmer [oui/N]")).strip().lower() == "oui"
+                print(f"  {ui.success('●')} Renommage : {rename_path(target, name, confirmed=confirmed)}")
                 pause()
             elif choice in {"cp", "mv"}:
                 source_raw = Path(input(ui.prompt("Source")).strip())
@@ -139,20 +206,36 @@ def local_files_menu() -> None:
                 source = source_raw if source_raw.is_absolute() else current / source_raw
                 destination = destination_raw if destination_raw.is_absolute() else current / destination_raw
                 overwrite = input(ui.prompt("Écraser si existe [oui/N]")).strip().lower() == "oui"
+                protected = is_protected_path(source) if choice == "mv" else False
+                protected = protected or is_protected_path(destination)
+                confirmed = not protected or input(ui.prompt("Chemin protégé, confirmer [oui/N]")).strip().lower() == "oui"
                 action = copy_path if choice == "cp" else move_path
-                print(f"  {ui.success('●')} Résultat : {action(source, destination, overwrite=overwrite)}")
+                print(f"  {ui.success('●')} Résultat : {action(source, destination, overwrite=overwrite, confirmed=confirmed)}")
                 pause()
             elif choice == "trash":
                 path = Path(input(ui.prompt("Chemin")).strip())
                 target = path if path.is_absolute() else current / path
                 answer = input(ui.prompt(f"Envoyer {target} à la Corbeille [oui/N]")).strip().lower()
                 if answer == "oui":
-                    print(f"  {ui.success('●')} Corbeille : {trash_path(target)}")
+                    print(f"  {ui.success('●')} Corbeille : {trash_path(target, confirmed=True)}")
                 pause()
             elif choice == "open":
                 path = Path(input(ui.prompt("Chemin")).strip() or str(current))
                 target = path if path.is_absolute() else current / path
                 print(f"  {ui.success('●')} Ouverture : {open_path(target)}")
+                pause()
+            elif choice == "chmod":
+                path = Path(input(ui.prompt("Fichier")).strip())
+                target = path if path.is_absolute() else current / path
+                confirmed = not is_protected_path(target) or input(ui.prompt("Chemin protégé, confirmer [oui/N]")).strip().lower() == "oui"
+                print(f"  {ui.success('●')} Exécutable : {make_executable(target, confirmed=confirmed)}")
+                pause()
+            elif choice == "script":
+                path = Path(input(ui.prompt("Fichier")).strip())
+                target = path if path.is_absolute() else current / path
+                name = input(ui.prompt("Nom script Eclipse")).strip() or target.stem
+                script = add_script(name, target, tags=["explorer"], overwrite=False)
+                print(f"  {ui.success('●')} Script ajouté : {script.name}")
                 pause()
             else:
                 print(ui.danger("Choix invalide."))

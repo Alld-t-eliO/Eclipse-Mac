@@ -39,6 +39,9 @@ eclipse files mkdir ~/Work/new-folder
 eclipse files copy ~/Notes/todo.txt ~/Backups/todo.txt
 eclipse files move ~/Backups/todo.txt ~/Backups/todo-old.txt
 eclipse files trash ~/Backups/todo-old.txt --yes
+eclipse files search ~/Documents invoice --name "*.pdf"
+eclipse files preview ~/Documents/config.json
+eclipse files script-add ~/scripts/cleanup.sh cleanup
 eclipse admin status
 eclipse security scan --check security --check firewall
 eclipse security scan --json
@@ -62,23 +65,38 @@ scripts, and the `Administration & Security` menu.
 Eclipse includes a local file explorer for macOS. It can browse folders, preview
 UTF-8 text files, create files and folders, copy, move, rename, send files to
 the macOS Trash, and open paths through Finder or the default macOS app.
+Sensitive paths such as system folders, `~/Library`, `~/.ssh`, `~/.gnupg`, and
+`~/.config` require explicit confirmation before write operations.
 
 Useful commands:
 
 ```bash
+eclipse files favorites
 eclipse files ls ~/Documents --hidden
+eclipse files info ~/.ssh
 eclipse files cat ~/Documents/note.txt
 eclipse files write ~/Documents/note.txt "Appended note" --append
+eclipse files edit-line ~/Documents/note.txt 2 "Replacement line"
 eclipse files mkdir ~/Documents/Eclipse
 eclipse files rename ~/Documents/old.txt new.txt
 eclipse files copy ~/Documents/new.txt ~/Desktop/new.txt
 eclipse files move ~/Desktop/new.txt ~/Documents/Eclipse/new.txt
 eclipse files trash ~/Documents/Eclipse/new.txt --yes
 eclipse files open ~/Documents
+eclipse files preview ~/Downloads/archive.zip
+eclipse files search ~/Projects config --name "*.json" --depth 5
+eclipse files chmod+x ~/scripts/tool.sh
+eclipse files script-add ~/scripts/tool.sh tool
 ```
 
 `trash` requires `--yes` in the CLI. In the interactive UI, Eclipse asks for
-confirmation before moving a path to the Trash.
+confirmation before moving a path to the Trash. Mutating operations are written
+to the private audit log, and Eclipse creates local backups before overwriting,
+moving, renaming, editing, or trashing existing paths unless `--no-backup` is
+used.
+
+Preview supports directories, UTF-8 text, JSON pretty-printing, image metadata
+for common formats, and ZIP archive listings.
 
 ## Administration And Security
 

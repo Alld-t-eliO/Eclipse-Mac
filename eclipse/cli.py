@@ -6,7 +6,25 @@ from pathlib import Path
 
 from . import __version__
 from .errors import EclipseError
-from .inbox import copy_path, format_entry, list_entries, local_files, make_directory, move_path, open_path, read_text, rename_path, trash_path, write_text
+from .inbox import (
+    copy_path,
+    edit_line,
+    favorites,
+    file_info,
+    format_entry,
+    list_entries,
+    local_files,
+    make_directory,
+    make_executable,
+    move_path,
+    open_path,
+    preview_path,
+    read_text,
+    rename_path,
+    search_entries,
+    trash_path,
+    write_text,
+)
 from .local_system import common_folders, local_status
 from .memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
 from .security import DEFAULT_CHECKS, format_findings, run_checks, write_report
@@ -36,6 +54,11 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--limit", type=int, default=50)
     item.add_argument("--hidden", action="store_true", help="inclure les fichiers cachés")
 
+    files_commands.add_parser("favorites", help="lister les emplacements rapides")
+
+    item = files_commands.add_parser("info", help="afficher les permissions et métadonnées")
+    item.add_argument("path", type=Path)
+
     item = files_commands.add_parser("cat", help="afficher un fichier texte")
     item.add_argument("path", type=Path)
     item.add_argument("--max-bytes", type=int, default=20000)
@@ -45,31 +68,70 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("text", nargs="+")
     item.add_argument("--append", action="store_true")
     item.add_argument("--overwrite", action="store_true")
+    item.add_argument("--yes", action="store_true", help="confirmer l'écriture dans un chemin protégé")
+    item.add_argument("--no-backup", action="store_true", help="ne pas créer de sauvegarde avant modification")
+
+    item = files_commands.add_parser("edit-line", help="remplacer une ligne dans un fichier texte")
+    item.add_argument("path", type=Path)
+    item.add_argument("line", type=int)
+    item.add_argument("text", nargs="+")
+    item.add_argument("--yes", action="store_true", help="confirmer l'édition dans un chemin protégé")
+    item.add_argument("--no-backup", action="store_true", help="ne pas créer de sauvegarde avant modification")
 
     item = files_commands.add_parser("mkdir", help="créer un dossier")
     item.add_argument("path", type=Path)
+    item.add_argument("--yes", action="store_true", help="confirmer la création dans un chemin protégé")
 
     item = files_commands.add_parser("copy", help="copier un fichier ou dossier")
     item.add_argument("source", type=Path)
     item.add_argument("destination", type=Path)
     item.add_argument("--overwrite", action="store_true")
+    item.add_argument("--yes", action="store_true", help="confirmer la copie vers un chemin protégé")
+    item.add_argument("--no-backup", action="store_true", help="ne pas sauvegarder la destination avant remplacement")
 
     item = files_commands.add_parser("move", help="déplacer un fichier ou dossier")
     item.add_argument("source", type=Path)
     item.add_argument("destination", type=Path)
     item.add_argument("--overwrite", action="store_true")
+    item.add_argument("--yes", action="store_true", help="confirmer le déplacement d'un chemin protégé")
+    item.add_argument("--no-backup", action="store_true", help="ne pas créer de sauvegarde avant modification")
 
     item = files_commands.add_parser("rename", help="renommer un fichier ou dossier")
     item.add_argument("source", type=Path)
     item.add_argument("name")
     item.add_argument("--overwrite", action="store_true")
+    item.add_argument("--yes", action="store_true", help="confirmer le renommage d'un chemin protégé")
+    item.add_argument("--no-backup", action="store_true", help="ne pas créer de sauvegarde avant modification")
 
     item = files_commands.add_parser("trash", help="déplacer vers la Corbeille")
     item.add_argument("path", type=Path)
     item.add_argument("--yes", action="store_true", help="confirmer l'action")
+    item.add_argument("--no-backup", action="store_true", help="ne pas créer de sauvegarde avant modification")
 
     item = files_commands.add_parser("open", help="ouvrir avec macOS")
     item.add_argument("path", type=Path)
+
+    item = files_commands.add_parser("preview", help="prévisualiser fichier, dossier, image ou archive")
+    item.add_argument("path", type=Path)
+    item.add_argument("--max-bytes", type=int, default=20000)
+
+    item = files_commands.add_parser("search", help="chercher par nom sous un dossier")
+    item.add_argument("root", type=Path)
+    item.add_argument("query", nargs="?")
+    item.add_argument("--name", help="motif de nom, par exemple *.py")
+    item.add_argument("--depth", type=int, default=4)
+    item.add_argument("--limit", type=int, default=50)
+    item.add_argument("--hidden", action="store_true")
+
+    item = files_commands.add_parser("chmod+x", help="rendre un fichier exécutable")
+    item.add_argument("path", type=Path)
+    item.add_argument("--yes", action="store_true", help="confirmer la modification dans un chemin protégé")
+
+    item = files_commands.add_parser("script-add", help="ajouter un fichier aux scripts Eclipse")
+    item.add_argument("path", type=Path)
+    item.add_argument("name", nargs="?")
+    item.add_argument("--tag", action="append", default=[])
+    item.add_argument("--overwrite", action="store_true")
 
     security = commands.add_parser("security", help="auditer la sécurité du Mac")
     security_commands = security.add_subparsers(dest="security_command", required=True)
@@ -207,24 +269,48 @@ def dispatch(args: argparse.Namespace) -> None:
             entries = list_entries(args.path, limit=args.limit, include_hidden=args.hidden)
             print(args.path.expanduser().resolve())
             print("\n".join(format_entry(entry) for entry in entries) or "Aucun fichier.")
+        elif args.files_command == "favorites":
+            for name, path in favorites().items():
+                print(f"{name}: {path}")
+        elif args.files_command == "info":
+            print("\n".join(file_info(args.path)))
         elif args.files_command == "cat":
             print(read_text(args.path, max_bytes=args.max_bytes), end="")
         elif args.files_command == "write":
-            print(f"Fichier écrit : {write_text(args.path, ' '.join(args.text), append=args.append, overwrite=args.overwrite)}")
+            print(
+                f"Fichier écrit : "
+                f"{write_text(args.path, ' '.join(args.text), append=args.append, overwrite=args.overwrite, confirmed=args.yes, create_backup=not args.no_backup)}"
+            )
+        elif args.files_command == "edit-line":
+            print(f"Fichier édité : {edit_line(args.path, args.line, ' '.join(args.text), confirmed=args.yes, create_backup=not args.no_backup)}")
         elif args.files_command == "mkdir":
-            print(f"Dossier créé : {make_directory(args.path)}")
+            print(f"Dossier créé : {make_directory(args.path, confirmed=args.yes)}")
         elif args.files_command == "copy":
-            print(f"Copie : {copy_path(args.source, args.destination, overwrite=args.overwrite)}")
+            print(f"Copie : {copy_path(args.source, args.destination, overwrite=args.overwrite, confirmed=args.yes, create_backup=not args.no_backup)}")
         elif args.files_command == "move":
-            print(f"Déplacement : {move_path(args.source, args.destination, overwrite=args.overwrite)}")
+            print(f"Déplacement : {move_path(args.source, args.destination, overwrite=args.overwrite, confirmed=args.yes, create_backup=not args.no_backup)}")
         elif args.files_command == "rename":
-            print(f"Renommage : {rename_path(args.source, args.name, overwrite=args.overwrite)}")
+            print(f"Renommage : {rename_path(args.source, args.name, overwrite=args.overwrite, confirmed=args.yes, create_backup=not args.no_backup)}")
         elif args.files_command == "trash":
             if not args.yes:
                 raise EclipseError("Ajoute --yes pour confirmer le déplacement vers la Corbeille.")
-            print(f"Corbeille : {trash_path(args.path)}")
+            print(f"Corbeille : {trash_path(args.path, confirmed=True, create_backup=not args.no_backup)}")
         elif args.files_command == "open":
             print(f"Ouverture : {open_path(args.path)}")
+        elif args.files_command == "preview":
+            preview = preview_path(args.path, max_bytes=args.max_bytes)
+            print("\n".join(preview.details))
+            if preview.content is not None:
+                print()
+                print(preview.content)
+        elif args.files_command == "search":
+            entries = search_entries(args.root, args.query, name=args.name, max_depth=args.depth, limit=args.limit, include_hidden=args.hidden)
+            print("\n".join(f"{entry.path}  ({entry.kind})" for entry in entries) or "Aucun résultat.")
+        elif args.files_command == "chmod+x":
+            print(f"Exécutable : {make_executable(args.path, confirmed=args.yes)}")
+        elif args.files_command == "script-add":
+            script = add_script(args.name or args.path.stem, args.path, tags=args.tag or ["explorer"], overwrite=args.overwrite)
+            print(f"Script ajouté : {script.name} → {script.path}")
         return
     if args.command == "security":
         if args.security_command == "scan":
