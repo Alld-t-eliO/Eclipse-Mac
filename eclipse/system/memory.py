@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from eclipse.errors import EclipseError
+from eclipse.system.errors import EclipseError
 
 
 MAX_TEXT_LENGTH = 20_000

@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .audit import default_log_path
-from .automation import history_path as automation_history_path
-from .errors import EclipseError
-from .scripts import history_path as scripts_history_path
-from .security import default_report_dir
+from eclipse.modules.audit import default_log_path
+from eclipse.modules.automation import history_path as automation_history_path
+from eclipse.system.errors import EclipseError
+from eclipse.modules.scripts import history_path as scripts_history_path
+from eclipse.modules.security import default_report_dir
 
 
 LOG_SOURCES = ("audit", "scripts", "automation", "security", "system")

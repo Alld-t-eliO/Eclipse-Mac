@@ -3,10 +3,10 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from eclipse import style as ui
-from eclipse.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
-from eclipse.errors import EclipseError
-from eclipse.inbox import (
+from eclipse.core import style as ui
+from eclipse.modules.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
+from eclipse.system.errors import EclipseError
+from eclipse.system.inbox import (
     copy_path,
     edit_line,
     favorites,
@@ -25,13 +25,14 @@ from eclipse.inbox import (
     trash_path,
     write_text,
 )
-from eclipse.local_system import LocalStatus, local_status
-from eclipse.logs import LOG_SOURCES, collect_logs, export_logs, format_log
-from eclipse.memory import add_memory, filter_memories, load_memories, summarize
-from eclipse.plugins import list_plugins
-from eclipse.recovery import archive_snapshot, snapshot
-from eclipse.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, password_status, run_checks, write_report
-from eclipse.scripts import add_script, load_scripts, run_script
+from eclipse.system.status import LocalStatus, local_status
+from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
+from eclipse.system.memory import add_memory, filter_memories, load_memories, summarize
+from eclipse.modules.plugins import list_plugins
+from eclipse.system.recovery import archive_snapshot, snapshot
+from eclipse.modules.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, password_status, run_checks, write_report
+from eclipse.modules.scripts import add_script, load_scripts, run_script
+from eclipse.modules.vps import format_upload_result, upload_path
 
 LOGO = r"""
     ______     __  _
@@ -505,6 +506,41 @@ def logs_menu() -> None:
         pause()
 
 
+def vps_menu() -> None:
+    while True:
+        header("VPS // TRANSFERS")
+        print(ui.menu_line("[1]", "Upload file or folder"))
+        print(ui.menu_line("[0]", "Back"), "\n")
+        choice = input(ui.prompt()).strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            try:
+                source = Path(input(ui.prompt("Local source")).strip())
+                host = input(ui.prompt("VPS host")).strip()
+                user = input(ui.prompt("SSH user optional")).strip() or None
+                remote_path = input(ui.prompt("Remote folder")).strip()
+                port_raw = input(ui.prompt("SSH port optional")).strip()
+                identity_raw = input(ui.prompt("SSH key optional")).strip()
+                dry_run = is_yes(input(ui.prompt("Dry-run [yes/N]")))
+                result = upload_path(
+                    source,
+                    host=host,
+                    user=user,
+                    remote_path=remote_path,
+                    port=int(port_raw) if port_raw else None,
+                    identity=Path(identity_raw) if identity_raw else None,
+                    dry_run=dry_run,
+                )
+                print()
+                print("\n".join(f"  {line}" for line in format_upload_result(result).splitlines()))
+            except (EclipseError, ValueError) as error:
+                print(ui.danger(f"\n  ✗ {error}"))
+        else:
+            print(ui.danger("Invalid choice."))
+        pause()
+
+
 def launch() -> None:
     ui.boot_animation()
     while True:
@@ -520,6 +556,7 @@ def launch() -> None:
             ui.menu_line("[7]", "Plugins"),
             ui.menu_line("[8]", "Recovery"),
             ui.menu_line("[9]", "Logs"),
+            ui.menu_line("[10]", "VPS transfers"),
             ui.menu_line("[0]", "Quit", danger_action=True),
         ]
         ui.columns(menu, local_panel(status))
@@ -538,6 +575,7 @@ def launch() -> None:
             "7": plugins_menu,
             "8": recovery_menu,
             "9": logs_menu,
+            "10": vps_menu,
         }
         action = actions.get(choice)
         if action is None:

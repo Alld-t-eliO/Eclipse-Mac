@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-from eclipse.errors import EclipseError
+from eclipse.system.errors import EclipseError
 
 
 LEVEL_ORDER = {"OK": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}

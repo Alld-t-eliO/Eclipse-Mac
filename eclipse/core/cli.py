@@ -3,9 +3,9 @@ import argparse
 import sys
 from pathlib import Path
 from eclipse import __version__
-from eclipse.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
-from eclipse.errors import EclipseError
-from eclipse.inbox import (
+from eclipse.modules.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
+from eclipse.system.errors import EclipseError
+from eclipse.system.inbox import (
     copy_path,
     edit_line,
     export_entries,
@@ -25,14 +25,15 @@ from eclipse.inbox import (
     trash_path,
     write_text,
 )
-from eclipse.local_system import common_folders, local_status
-from eclipse.logs import LOG_SOURCES, collect_logs, export_logs, format_log
-from eclipse.memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
-from eclipse.plugins import create_plugin, list_plugins
-from eclipse.recovery import archive_snapshot, restore_snapshot, snapshot
-from eclipse.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, format_password_status, password_status, run_checks, write_report
-from eclipse.scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
-from eclipse.ui import launch
+from eclipse.system.status import common_folders, local_status
+from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
+from eclipse.system.memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
+from eclipse.modules.plugins import create_plugin, list_plugins
+from eclipse.system.recovery import archive_snapshot, restore_snapshot, snapshot
+from eclipse.modules.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, format_password_status, password_status, run_checks, write_report
+from eclipse.modules.scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
+from eclipse.modules.vps import format_upload_result, upload_path, upload_result_json
+from eclipse.core.ui import launch
 
 
 def parser() -> argparse.ArgumentParser:
@@ -271,6 +272,18 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--until", help="maximum ISO date")
     item.add_argument("--system", action="store_true", help="include macOS system logs")
     item.add_argument("--export", type=Path, help="export as JSON")
+
+    vps = commands.add_parser("vps", help="manage Mac to VPS workflows")
+    vps_commands = vps.add_subparsers(dest="vps_command", required=True)
+    item = vps_commands.add_parser("upload", help="send a local file or folder to a VPS")
+    item.add_argument("source", type=Path)
+    item.add_argument("--host", required=True, help="VPS host or IP")
+    item.add_argument("--user", help="SSH user")
+    item.add_argument("--remote-path", required=True, help="remote destination folder")
+    item.add_argument("--port", type=int, help="SSH port")
+    item.add_argument("--identity", type=Path, help="SSH private key")
+    item.add_argument("--dry-run", action="store_true", help="show transfer plan without uploading")
+    item.add_argument("--json", action="store_true", help="print JSON output")
     return root
 
 
@@ -566,6 +579,21 @@ def dispatch(args: argparse.Namespace) -> None:
             print("\n".join(format_log(entry) for entry in entries) or "No logs.")
             if args.export:
                 print(f"Export : {export_logs(entries, args.export)}")
+        return
+    if args.command == "vps":
+        if args.vps_command == "upload":
+            result = upload_path(
+                args.source,
+                host=args.host,
+                user=args.user,
+                remote_path=args.remote_path,
+                port=args.port,
+                identity=args.identity,
+                dry_run=args.dry_run,
+            )
+            print(upload_result_json(result) if args.json else format_upload_result(result))
+            if result.returncode:
+                raise EclipseError(f"VPS upload failed with code {result.returncode}.")
         return
 
 

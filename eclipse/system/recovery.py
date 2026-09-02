@@ -8,10 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from eclipse.audit import default_log_path, record
-from eclipse.errors import EclipseError
-from eclipse.memory import default_memory_path
-from eclipse.scripts import default_scripts_home
+from eclipse.modules.audit import default_log_path, record
+from eclipse.system.errors import EclipseError
+from eclipse.system.memory import default_memory_path
+from eclipse.modules.scripts import default_scripts_home
 
 
 def default_recovery_home() -> Path:

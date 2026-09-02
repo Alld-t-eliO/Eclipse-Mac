@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 from typing import Iterable
 from zipfile import BadZipFile, ZipFile
-from eclipse.audit import record
-from eclipse.errors import EclipseError
+from eclipse.modules.audit import record
+from eclipse.system.errors import EclipseError
 
 
 @dataclass(frozen=True)

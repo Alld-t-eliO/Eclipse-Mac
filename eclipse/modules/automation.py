@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from eclipse.audit import record
-from eclipse.errors import EclipseError
-from eclipse.runner import Result, shell_display
+from eclipse.modules.audit import record
+from eclipse.system.errors import EclipseError
+from eclipse.system.runner import Result, shell_display
 
 
 INTERVALS = {
@@ -188,7 +188,7 @@ def run_job(name: str, *, root: Path | None = None, dry_run: bool = False) -> Re
     if name not in jobs:
         raise EclipseError(f"Unknown automation: {name}")
     job = jobs[name]
-    command = [sys.executable, "-m", "eclipse.cli", *job.command]
+    command = [sys.executable, "-m", "eclipse.core.cli", *job.command]
     if dry_run:
         result = Result(0, shell_display(command), "")
         append_history(job, result, dry_run=True, root=root)

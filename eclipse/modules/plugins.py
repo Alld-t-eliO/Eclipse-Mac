@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from eclipse.errors import EclipseError
+from eclipse.system.errors import EclipseError
 
 
 @dataclass(frozen=True)

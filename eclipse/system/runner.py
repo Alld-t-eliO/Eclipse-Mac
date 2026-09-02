@@ -5,8 +5,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from eclipse.audit import record
-from eclipse.errors import EclipseError
+from eclipse.modules.audit import record
+from eclipse.system.errors import EclipseError
 
 
 @dataclass(frozen=True)

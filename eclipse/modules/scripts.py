@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from eclipse.audit import record
-from eclipse.errors import EclipseError
-from eclipse.runner import Result, shell_display
+from eclipse.modules.audit import record
+from eclipse.system.errors import EclipseError
+from eclipse.system.runner import Result, shell_display
 
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
