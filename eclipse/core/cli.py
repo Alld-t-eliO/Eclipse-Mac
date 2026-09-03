@@ -30,7 +30,22 @@ from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
 from eclipse.system.memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
 from eclipse.modules.plugins import create_plugin, list_plugins
 from eclipse.system.recovery import archive_snapshot, restore_snapshot, snapshot
-from eclipse.modules.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, format_password_status, password_status, run_checks, write_report
+from eclipse.modules.security import (
+    DEFAULT_CHECKS,
+    confirm_password_rotation,
+    format_findings,
+    format_password_status,
+    format_report_diff,
+    format_report_history,
+    format_remediation_plan,
+    latest_report_pair,
+    list_checks,
+    load_reports,
+    password_status,
+    remediation_plan,
+    run_checks,
+    write_report,
+)
 from eclipse.modules.scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
 from eclipse.vps.vps import format_upload_result, upload_path, upload_result_json
 from eclipse.core.ui import launch
@@ -152,6 +167,32 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--deep", action="store_true", help="run slower checks")
     item.add_argument("--json", action="store_true", help="write a private JSON report")
     item.add_argument("--output-dir", type=Path, help="JSON reports directory")
+    checks_item = security_commands.add_parser("checks", help="list available security checks")
+    checks_item.add_argument("--verbose", action="store_true")
+    item = security_commands.add_parser("history", help="list security report history")
+    item.add_argument("--limit", type=int, default=20)
+    item.add_argument("--report-dir", type=Path)
+    item = security_commands.add_parser("diff", help="compare the latest two security reports")
+    item.add_argument("--report-dir", type=Path)
+    remediate = security_commands.add_parser("remediate", help="show read-only remediation guidance")
+    remediate_commands = remediate.add_subparsers(dest="remediate_command", required=True)
+    item = remediate_commands.add_parser("plan", help="plan remediations without changing the system")
+    item.add_argument("--check", action="append", choices=DEFAULT_CHECKS, help="targeted check, repeatable")
+    item.add_argument("--deep", action="store_true", help="run slower checks")
+    secrets = security_commands.add_parser("secrets", help="run local secret checks")
+    secrets_commands = secrets.add_subparsers(dest="secrets_command", required=True)
+    item = secrets_commands.add_parser("scan", help="scan a folder for likely secrets")
+    item.add_argument("path", nargs="?", type=Path, default=Path.cwd())
+    item.add_argument("--limit", type=int, default=100)
+    downloads = security_commands.add_parser("downloads", help="inspect downloaded files")
+    downloads_commands = downloads.add_subparsers(dest="downloads_command", required=True)
+    item = downloads_commands.add_parser("quarantine", help="list quarantined downloaded files")
+    item.add_argument("--folder", type=Path, default=Path.home() / "Downloads")
+    dmg = security_commands.add_parser("dmg", help="inspect disk images before opening")
+    dmg_commands = dmg.add_subparsers(dest="dmg_command", required=True)
+    item = dmg_commands.add_parser("inspect", help="inspect a local DMG")
+    item.add_argument("path", type=Path)
+    item.add_argument("--open", action="store_true", help="open the DMG after inspection")
     password = security_commands.add_parser("password", help="track password rotation")
     password_commands = password.add_subparsers(dest="password_command", required=True)
     password_commands.add_parser("status", help="show rotation status")
@@ -433,6 +474,37 @@ def dispatch(args: argparse.Namespace) -> None:
             print(format_findings(findings))
             if args.json:
                 print(f"\nReport: {write_report(findings, args.output_dir)}")
+        elif args.security_command == "checks":
+            for check in list_checks():
+                suffix = f" - {check.description}" if args.verbose and check.description else ""
+                print(f"{check.name}: {check.label}{suffix}")
+        elif args.security_command == "history":
+            print(format_report_history(load_reports(args.report_dir, limit=args.limit)))
+        elif args.security_command == "diff":
+            previous, current = latest_report_pair(args.report_dir)
+            print(format_report_diff(previous, current))
+        elif args.security_command == "remediate":
+            if args.remediate_command == "plan":
+                findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
+                print(format_remediation_plan(remediation_plan(findings)))
+        elif args.security_command == "secrets":
+            if args.secrets_command == "scan":
+                result = run_script("find-secrets-local", arguments=["--path", str(args.path), "--limit", str(args.limit)], force=True)
+                if result.returncode:
+                    raise EclipseError(f"Secret scan failed with code {result.returncode}.")
+        elif args.security_command == "downloads":
+            if args.downloads_command == "quarantine":
+                result = run_script("quarantine-downloads-audit", arguments=["--folder", str(args.folder)], force=True)
+                if result.returncode:
+                    raise EclipseError(f"Downloads quarantine audit failed with code {result.returncode}.")
+        elif args.security_command == "dmg":
+            if args.dmg_command == "inspect":
+                arguments = ["--file", str(args.path)]
+                if args.open:
+                    arguments.append("--open")
+                result = run_script("safe-open-dmg", arguments=arguments, force=True)
+                if result.returncode:
+                    raise EclipseError(f"DMG inspection failed with code {result.returncode}.")
         elif args.security_command == "password":
             if args.password_command == "status":
                 print(format_password_status(password_status()))

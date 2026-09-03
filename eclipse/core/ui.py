@@ -28,7 +28,19 @@ from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
 from eclipse.system.memory import add_memory, filter_memories, load_memories, summarize
 from eclipse.modules.plugins import list_plugins
 from eclipse.system.recovery import archive_snapshot, snapshot
-from eclipse.modules.security import DEFAULT_CHECKS, confirm_password_rotation, format_findings, password_status, run_checks, write_report
+from eclipse.modules.security import (
+    DEFAULT_CHECKS,
+    confirm_password_rotation,
+    format_findings,
+    format_report_diff,
+    format_report_history,
+    latest_report_pair,
+    list_checks,
+    load_reports,
+    password_status,
+    run_checks,
+    write_report,
+)
 from eclipse.modules.scripts import add_script, load_scripts, run_script
 from eclipse.vps.vps import format_upload_result, upload_path
 
@@ -39,8 +51,8 @@ LOGO = r"""
  / /___/ /__/ / / / /_/ (__  )  __/
 /_____/\___/_/_/_/ .___/____/\___/
                 /_/
-    
-    by Aegon
+
+   ==== By Aegon ====
 """
 
 
@@ -57,7 +69,7 @@ def is_yes(value: str) -> bool:
     return value.strip().lower() in {"y", "yes", "oui"}
 
 
-def header(title: str = "MAC CONTROL CENTER") -> None:
+def header(title: str = "CONTROL CENTER") -> None:
     status = local_status()
     passwords = password_status()
     password_light = ui.success("● PWD OK") if passwords.changed and not passwords.expired else ui.danger("● PWD CHANGE DUE")
@@ -368,18 +380,7 @@ def local_scripts_menu() -> None:
 
 
 def security_menu() -> None:
-    checks = (
-        ("security", "Apple controls"),
-        ("firewall", "Firewall"),
-        ("sharing", "Remote sharing"),
-        ("network", "Network"),
-        ("persistence", "Persistence"),
-        ("services", "Services"),
-        ("updates", "Updates"),
-        ("filesystem", "Sensitive files"),
-        ("processes", "Processes"),
-        ("docker", "Docker"),
-    )
+    checks = tuple((check.name, check.label) for check in list_checks())
     while True:
         header("SECURITY")
         status = password_status()
@@ -391,6 +392,11 @@ def security_menu() -> None:
         print(ui.menu_line("[1]", "Run security scan"))
         print(ui.menu_line("[2]", "Full JSON report"))
         print(ui.menu_line("[3]", "Confirm password change"))
+        print(ui.menu_line("[hist]", "Report history"))
+        print(ui.menu_line("[diff]", "Latest report diff"))
+        print(ui.menu_line("[secrets]", "Secret pattern scan"))
+        print(ui.menu_line("[quarantine]", "Downloads quarantine audit"))
+        print(ui.menu_line("[dmg]", "Inspect DMG"))
         for index, (_, label) in enumerate(checks, 4):
             print(ui.menu_line(f"[{index}]", label))
         print(ui.menu_line("[0]", "Back"), "\n")
@@ -409,6 +415,33 @@ def security_menu() -> None:
             if is_yes(answer):
                 updated = confirm_password_rotation()
                 print(f"\n  {ui.success('●')} Confirmed until {updated.next_due_at}")
+        elif choice == "hist":
+            print()
+            print(format_report_history(load_reports(limit=10)))
+        elif choice == "diff":
+            print()
+            previous, current = latest_report_pair()
+            print(format_report_diff(previous, current))
+        elif choice == "secrets":
+            path = Path(input(ui.prompt("Folder")).strip() or str(Path.cwd()))
+            limit = input(ui.prompt("Limit")).strip() or "100"
+            result = run_script("find-secrets-local", arguments=["--path", str(path), "--limit", limit], force=True)
+            if result.returncode:
+                raise EclipseError(f"Secret scan failed with code {result.returncode}.")
+        elif choice == "quarantine":
+            folder = Path(input(ui.prompt("Downloads folder")).strip() or str(Path.home() / "Downloads"))
+            result = run_script("quarantine-downloads-audit", arguments=["--folder", str(folder)], force=True)
+            if result.returncode:
+                raise EclipseError(f"Downloads quarantine audit failed with code {result.returncode}.")
+        elif choice == "dmg":
+            path = Path(input(ui.prompt("DMG path")).strip())
+            open_after = is_yes(input(ui.prompt("Open after inspection [yes/N]")))
+            arguments = ["--file", str(path)]
+            if open_after:
+                arguments.append("--open")
+            result = run_script("safe-open-dmg", arguments=arguments, force=True)
+            if result.returncode:
+                raise EclipseError(f"DMG inspection failed with code {result.returncode}.")
         elif choice.isdigit() and 4 <= int(choice) < 4 + len(checks):
             check = checks[int(choice) - 4][0]
             findings = run_checks((check,))
