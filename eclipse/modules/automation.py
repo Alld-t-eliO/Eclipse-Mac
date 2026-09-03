@@ -59,6 +59,17 @@ class AutomationJob:
         }
 
 
+@dataclass(frozen=True)
+class AutomationSuggestion:
+    name: str
+    every: str
+    command: tuple[str, ...]
+    description: str
+
+    def add_command(self) -> str:
+        return shell_display(["eclipse", "automation", "add", self.name, "--every", self.every, "--command", *self.command])
+
+
 def default_automation_home() -> Path:
     override = os.environ.get("ECLIPSE_AUTOMATION_HOME")
     if override:
@@ -85,6 +96,75 @@ def default_command(name: str) -> tuple[str, ...]:
     if "security" in lowered or "scan" in lowered:
         return ("security", "scan", "--json")
     return ("scripts", "run", name)
+
+
+def suggested_automations() -> tuple[AutomationSuggestion, ...]:
+    return (
+        AutomationSuggestion(
+            "daily-security-scan",
+            "day",
+            ("security", "scan", "--json"),
+            "Run a daily read-only security scan and store a private JSON report.",
+        ),
+        AutomationSuggestion(
+            "weekly-security-remediation-plan",
+            "week",
+            ("security", "remediate", "plan"),
+            "Print a weekly read-only list of recommended security actions.",
+        ),
+        AutomationSuggestion(
+            "weekly-downloads-quarantine-audit",
+            "week",
+            ("security", "downloads", "quarantine"),
+            "Review downloaded files that still carry the macOS quarantine attribute.",
+        ),
+        AutomationSuggestion(
+            "weekly-eclipse-backup-check",
+            "week",
+            ("scripts", "run", "backup-eclipse-data", "--dry-run"),
+            "Preview an Eclipse data backup so you can verify what would be saved.",
+        ),
+        AutomationSuggestion(
+            "weekly-local-secret-scan",
+            "week",
+            ("security", "secrets", "scan", str(Path.home()), "--limit", "50"),
+            "Search common local files for probable secret patterns without printing secret values.",
+        ),
+    )
+
+
+def format_suggestions() -> str:
+    lines = ["Suggested automations:"]
+    for index, item in enumerate(suggested_automations(), 1):
+        lines.append(f"{index}. {item.name} every {item.every}")
+        lines.append(f"   {item.description}")
+        lines.append(f"   Add: {item.add_command()}")
+    return "\n".join(lines)
+
+
+def format_quickstart() -> str:
+    lines = [
+        "Automation quickstart:",
+        "1. Add one suggested automation:",
+        "   eclipse automation add daily-security-scan --every day --command security scan --json",
+        "2. Preview due jobs without changing anything:",
+        "   eclipse automation run-due --dry-run",
+        "3. Run due jobs manually:",
+        "   eclipse automation run-due",
+        "4. Trigger due jobs hourly from a shell scheduler:",
+        "   /bin/zsh -lc 'eclipse automation run-due'",
+        "5. LaunchAgent command to run due jobs every hour:",
+        "   launchctl load ~/Library/LaunchAgents/dev.eclipse.automation.plist",
+        "",
+        "Minimal LaunchAgent ProgramArguments:",
+        "   /bin/zsh",
+        "   -lc",
+        "   eclipse automation run-due",
+        "",
+        "Eclipse stores automation definitions privately under:",
+        f"   {default_automation_home()}",
+    ]
+    return "\n".join(lines)
 
 
 def load_jobs(root: Path | None = None) -> dict[str, AutomationJob]:

@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 from eclipse import __version__
-from eclipse.modules.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
+from eclipse.modules.automation import add_job, format_quickstart, format_suggestions, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
 from eclipse.system.errors import EclipseError
 from eclipse.system.inbox import (
     copy_path,
@@ -29,21 +29,32 @@ from eclipse.system.status import common_folders, local_status
 from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
 from eclipse.system.memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
 from eclipse.modules.plugins import create_plugin, list_plugins
-from eclipse.system.recovery import archive_snapshot, restore_snapshot, snapshot
+from eclipse.system.recovery import archive_snapshot, format_snapshot_info, format_snapshot_list, list_snapshots, resolve_snapshot, restore_snapshot, snapshot, snapshot_info
 from eclipse.modules.security import (
     DEFAULT_CHECKS,
+    REPORT_FORMATS,
+    compare_baseline,
     confirm_password_rotation,
+    evaluate_policy,
+    export_report,
+    format_diff_categories,
     format_findings,
+    format_policy,
+    format_policy_evaluation,
     format_password_status,
     format_report_diff,
     format_report_history,
     format_remediation_plan,
     latest_report_pair,
+    load_latest_report,
+    load_policy,
     list_checks,
     load_reports,
     password_status,
     remediation_plan,
     run_checks,
+    save_baseline,
+    write_default_policy,
     write_report,
 )
 from eclipse.modules.scripts import add_script, get_script, load_history as load_script_history, load_scripts, remove_script, run_script
@@ -174,6 +185,33 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--report-dir", type=Path)
     item = security_commands.add_parser("diff", help="compare the latest two security reports")
     item.add_argument("--report-dir", type=Path)
+    baseline = security_commands.add_parser("baseline", help="save or compare a security baseline")
+    baseline_commands = baseline.add_subparsers(dest="baseline_command", required=True)
+    item = baseline_commands.add_parser("save", help="save the current expected security state")
+    item.add_argument("--path", type=Path)
+    item.add_argument("--check", action="append", choices=DEFAULT_CHECKS, help="targeted check, repeatable")
+    item.add_argument("--deep", action="store_true")
+    item = baseline_commands.add_parser("compare", help="compare current security state with the saved baseline")
+    item.add_argument("--path", type=Path)
+    item.add_argument("--check", action="append", choices=DEFAULT_CHECKS, help="targeted check, repeatable")
+    item.add_argument("--deep", action="store_true")
+    policy = security_commands.add_parser("policy", help="manage local security severity policy")
+    policy_commands = policy.add_subparsers(dest="policy_command", required=True)
+    item = policy_commands.add_parser("init", help="write the default local security policy")
+    item.add_argument("--path", type=Path)
+    item.add_argument("--overwrite", action="store_true")
+    item = policy_commands.add_parser("show", help="show the active local security policy")
+    item.add_argument("--path", type=Path)
+    item = policy_commands.add_parser("check", help="evaluate a scan against the active policy")
+    item.add_argument("--path", type=Path)
+    item.add_argument("--check", action="append", choices=DEFAULT_CHECKS, help="targeted check, repeatable")
+    item.add_argument("--deep", action="store_true")
+    report = security_commands.add_parser("report", help="export the latest security report")
+    report_commands = report.add_subparsers(dest="report_command", required=True)
+    item = report_commands.add_parser("export", help="export the latest report as JSON, Markdown, or HTML")
+    item.add_argument("--format", choices=REPORT_FORMATS, default="markdown")
+    item.add_argument("--output", required=True, type=Path)
+    item.add_argument("--report-dir", type=Path)
     remediate = security_commands.add_parser("remediate", help="show read-only remediation guidance")
     remediate_commands = remediate.add_subparsers(dest="remediate_command", required=True)
     item = remediate_commands.add_parser("plan", help="plan remediations without changing the system")
@@ -270,6 +308,8 @@ def parser() -> argparse.ArgumentParser:
     item.add_argument("--command", dest="automation_exec", nargs="+", help="Eclipse command to run, without the word eclipse")
     item.add_argument("--overwrite", action="store_true")
     automation_commands.add_parser("list", help="list automations")
+    automation_commands.add_parser("suggestions", help="show beginner-friendly automation suggestions")
+    automation_commands.add_parser("quickstart", help="show simple commands for running automations")
     item = automation_commands.add_parser("run", help="run an automation")
     item.add_argument("name")
     item.add_argument("--dry-run", action="store_true")
@@ -293,10 +333,19 @@ def parser() -> argparse.ArgumentParser:
     recovery_commands = recovery.add_subparsers(dest="recovery_command", required=True)
     item = recovery_commands.add_parser("snapshot", help="create a local snapshot")
     item.add_argument("--destination", type=Path)
+    item = recovery_commands.add_parser("view", help="list snapshots or show one snapshot's contents")
+    item.add_argument("snapshot", nargs="?")
+    item.add_argument("--root", type=Path, help="recovery folder to inspect")
+    item.add_argument("--limit", type=int, default=200, help="maximum content entries to show")
     item = recovery_commands.add_parser("export", help="export a snapshot as an archive")
     item.add_argument("snapshot", type=Path)
     item.add_argument("--destination", type=Path)
     item.add_argument("--password", help="password for simple encrypted export")
+    item = recovery_commands.add_parser("load", help="load a snapshot into a destination folder")
+    item.add_argument("snapshot")
+    item.add_argument("--destination", type=Path)
+    item.add_argument("--root", type=Path, help="recovery folder used for snapshot names")
+    item.add_argument("--yes", action="store_true")
     item = recovery_commands.add_parser("restore", help="restore a snapshot to a directory")
     item.add_argument("snapshot", type=Path)
     item.add_argument("--destination", type=Path)
@@ -483,6 +532,26 @@ def dispatch(args: argparse.Namespace) -> None:
         elif args.security_command == "diff":
             previous, current = latest_report_pair(args.report_dir)
             print(format_report_diff(previous, current))
+        elif args.security_command == "baseline":
+            if args.baseline_command == "save":
+                findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
+                print(f"Baseline: {save_baseline(findings, args.path)}")
+            elif args.baseline_command == "compare":
+                findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
+                diff = compare_baseline(findings, args.path)
+                print("Baseline comparison:")
+                print(format_diff_categories(diff))
+        elif args.security_command == "policy":
+            if args.policy_command == "init":
+                print(f"Policy: {write_default_policy(args.path, overwrite=args.overwrite)}")
+            elif args.policy_command == "show":
+                print(format_policy(load_policy(args.path)))
+            elif args.policy_command == "check":
+                findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
+                print(format_policy_evaluation(evaluate_policy(findings, load_policy(args.path), checks=args.check or DEFAULT_CHECKS)))
+        elif args.security_command == "report":
+            if args.report_command == "export":
+                print(f"Report export: {export_report(load_latest_report(args.report_dir), args.output, format=args.format)}")
         elif args.security_command == "remediate":
             if args.remediate_command == "plan":
                 findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
@@ -600,11 +669,17 @@ def dispatch(args: argparse.Namespace) -> None:
             jobs = load_jobs()
             if not jobs:
                 print("No automation.")
+                print()
+                print(format_suggestions())
             for job in jobs.values():
                 state = "enabled" if job.enabled else "disabled"
                 last = job.last_returncode if job.last_returncode is not None else ""
                 print(f"{job.name} [{state}] every={job.every} last={last}")
                 print(f"  eclipse {' '.join(job.command)}")
+        elif args.automation_command == "suggestions":
+            print(format_suggestions())
+        elif args.automation_command == "quickstart":
+            print(format_quickstart())
         elif args.automation_command == "run":
             result = run_job(args.name, dry_run=args.dry_run)
             if args.dry_run and result.stdout:
@@ -643,8 +718,15 @@ def dispatch(args: argparse.Namespace) -> None:
     if args.command == "recovery":
         if args.recovery_command == "snapshot":
             print(f"Snapshot : {snapshot(args.destination)}")
+        elif args.recovery_command == "view":
+            if args.snapshot:
+                print(format_snapshot_info(snapshot_info(resolve_snapshot(args.snapshot, root=args.root)), limit=args.limit))
+            else:
+                print(format_snapshot_list(list_snapshots(args.root)))
         elif args.recovery_command == "export":
             print(f"Export : {archive_snapshot(args.snapshot, args.destination, password=args.password)}")
+        elif args.recovery_command == "load":
+            print(f"Load : {restore_snapshot(resolve_snapshot(args.snapshot, root=args.root), args.destination, confirmed=args.yes)}")
         elif args.recovery_command == "restore":
             print(f"Restore : {restore_snapshot(args.snapshot, args.destination, confirmed=args.yes)}")
         return

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import getpass
+import html
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ SUSPICIOUS_PLIST = re.compile(r"curl|wget|nc |netcat|base64|osascript|python|per
 DEFAULT_CHECKS = ("security", "firewall", "sharing", "network", "persistence", "services", "updates", "filesystem", "processes", "docker")
 PASSWORD_ROTATION_DAYS = 183
 SENSITIVE_DOCKER_MOUNTS = ("/", "/etc", "/var/run/docker.sock", "/Users", str(Path.home()))
+REPORT_FORMATS = ("json", "markdown", "html")
 
 
 @dataclass(frozen=True)
@@ -644,18 +646,25 @@ def default_report_dir() -> Path:
     return Path.home() / "Library" / "Application Support" / "Eclipse" / "security-reports"
 
 
+def default_baseline_path() -> Path:
+    override = os.environ.get("ECLIPSE_SECURITY_BASELINE_PATH")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Library" / "Application Support" / "Eclipse" / "security-baseline.json"
+
+
+def default_policy_path() -> Path:
+    override = os.environ.get("ECLIPSE_SECURITY_POLICY_PATH")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Library" / "Application Support" / "Eclipse" / "security-policy.json"
+
+
 def write_report(findings: list[Finding], destination: Path | None = None) -> Path:
     root = (destination or default_report_dir()).expanduser()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = next_report_path(root, stamp)
-    payload = {
-        "schema_version": 2,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "user": getpass.getuser(),
-        "score": security_score(findings),
-        "summary": summary(findings),
-        "findings": [item.to_record() for item in findings],
-    }
+    payload = report_payload(findings)
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -663,6 +672,17 @@ def write_report(findings: list[Finding], destination: Path | None = None) -> Pa
     except OSError as error:
         raise EclipseError(f"Unable to write security report: {error}") from error
     return path
+
+
+def report_payload(findings: list[Finding]) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "user": getpass.getuser(),
+        "score": security_score(findings),
+        "summary": summary(findings),
+        "findings": [item.to_record() for item in findings],
+    }
 
 
 def next_report_path(root: Path, stamp: str) -> Path:
@@ -693,6 +713,45 @@ def load_reports(directory: Path | None = None, *, limit: int = 20) -> list[dict
     return reports[-limit:]
 
 
+def load_latest_report(directory: Path | None = None) -> dict[str, Any]:
+    reports = load_reports(directory, limit=1)
+    if not reports:
+        raise EclipseError("No security report found.")
+    return reports[0]
+
+
+def save_baseline(findings: list[Finding], path: Path | None = None) -> Path:
+    target = (path or default_baseline_path()).expanduser()
+    payload = report_payload(findings)
+    payload["kind"] = "security-baseline"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        target.chmod(0o600)
+    except OSError as error:
+        raise EclipseError(f"Unable to write security baseline: {error}") from error
+    return target
+
+
+def load_baseline(path: Path | None = None) -> dict[str, Any]:
+    target = (path or default_baseline_path()).expanduser()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise EclipseError(f"Security baseline not found: {target}") from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise EclipseError(f"Unreadable security baseline: {error}") from error
+    if not isinstance(payload, dict):
+        raise EclipseError("Invalid security baseline: expected an object.")
+    payload["_path"] = str(target)
+    return payload
+
+
+def compare_baseline(findings: list[Finding], path: Path | None = None) -> dict[str, list[dict[str, Any]]]:
+    current = report_payload(findings)
+    return diff_reports(load_baseline(path), current)
+
+
 def format_report_history(reports: list[dict[str, Any]]) -> str:
     if not reports:
         return "No security reports."
@@ -701,6 +760,99 @@ def format_report_history(reports: list[dict[str, Any]]) -> str:
         summary_text = report.get("summary", {})
         lines.append(f"{report.get('created_at', '')} score={report.get('score', '')} {summary_text}")
         lines.append(f"  {report.get('_path', '')}")
+    return "\n".join(lines)
+
+
+def default_policy() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "minimum_alert_level": "WARNING",
+        "required_checks": list(DEFAULT_CHECKS),
+        "ignored_finding_ids": [],
+        "level_overrides": {
+            "mac.firewall.enabled": "CRITICAL",
+            "mac.sip.enabled": "CRITICAL",
+            "mac.filevault.enabled": "WARNING",
+        },
+    }
+
+
+def write_default_policy(path: Path | None = None, *, overwrite: bool = False) -> Path:
+    target = (path or default_policy_path()).expanduser()
+    if target.exists() and not overwrite:
+        raise EclipseError(f"Security policy already exists: {target}")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target.write_text(json.dumps(default_policy(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        target.chmod(0o600)
+    except OSError as error:
+        raise EclipseError(f"Unable to write security policy: {error}") from error
+    return target
+
+
+def load_policy(path: Path | None = None) -> dict[str, Any]:
+    target = (path or default_policy_path()).expanduser()
+    if not target.exists():
+        return default_policy()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise EclipseError(f"Unreadable security policy: {error}") from error
+    if not isinstance(payload, dict):
+        raise EclipseError("Invalid security policy: expected an object.")
+    policy = default_policy()
+    policy.update(payload)
+    return policy
+
+
+def evaluate_policy(findings: list[Finding], policy: dict[str, Any] | None = None, *, checks: Iterable[str] = DEFAULT_CHECKS) -> dict[str, Any]:
+    active_policy = policy or load_policy()
+    ignored = {str(item) for item in active_policy.get("ignored_finding_ids", []) if item}
+    overrides = active_policy.get("level_overrides", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    minimum = str(active_policy.get("minimum_alert_level") or "WARNING")
+    minimum_order = LEVEL_ORDER.get(minimum, LEVEL_ORDER["WARNING"])
+    required = {str(item) for item in active_policy.get("required_checks", []) if item}
+    selected = set(checks)
+    missing_required = sorted(required - selected)
+    alerts: list[dict[str, Any]] = []
+    for item in findings:
+        record = item.to_record()
+        check_id = str(record.get("id", ""))
+        if check_id in ignored:
+            continue
+        level = str(overrides.get(check_id) or record.get("level") or "INFO")
+        if LEVEL_ORDER.get(level, 0) >= minimum_order:
+            record["policy_level"] = level
+            alerts.append(record)
+    return {"policy": active_policy, "alerts": alerts, "missing_required_checks": missing_required}
+
+
+def format_policy(policy: dict[str, Any]) -> str:
+    lines = [
+        f"Minimum alert level: {policy.get('minimum_alert_level', 'WARNING')}",
+        f"Required checks: {', '.join(str(item) for item in policy.get('required_checks', []))}",
+        f"Ignored finding ids: {', '.join(str(item) for item in policy.get('ignored_finding_ids', [])) or 'none'}",
+        "Level overrides:",
+    ]
+    overrides = policy.get("level_overrides", {})
+    if isinstance(overrides, dict) and overrides:
+        for check_id, level in sorted(overrides.items()):
+            lines.append(f"  {check_id}: {level}")
+    else:
+        lines.append("  none")
+    return "\n".join(lines)
+
+
+def format_policy_evaluation(result: dict[str, Any]) -> str:
+    alerts = result.get("alerts", [])
+    missing = result.get("missing_required_checks", [])
+    lines = [f"Policy alerts: {len(alerts)}"]
+    for item in alerts[:30]:
+        lines.append(f"  [{item.get('policy_level', item.get('level', ''))}] {finding_key(item)} - {item.get('title', '')}")
+    if missing:
+        lines.append(f"Missing required checks: {', '.join(str(item) for item in missing)}")
     return "\n".join(lines)
 
 
@@ -739,6 +891,12 @@ def format_report_diff(previous: dict[str, Any], current: dict[str, Any]) -> str
         f"Previous: {previous.get('created_at', '')} score={previous.get('score', '')}",
         f"Current : {current.get('created_at', '')} score={current.get('score', '')}",
     ]
+    lines.extend(format_diff_categories(diff).splitlines())
+    return "\n".join(lines)
+
+
+def format_diff_categories(diff: dict[str, list[dict[str, Any]]]) -> str:
+    lines: list[str] = []
     for label in ("added", "removed"):
         items = diff[label]
         lines.append(f"{label.title()}: {len(items)}")
@@ -768,6 +926,83 @@ def latest_report_pair(directory: Path | None = None) -> tuple[dict[str, Any], d
     if len(reports) < 2:
         raise EclipseError("At least two security reports are required for diff.")
     return reports[0], reports[1]
+
+
+def export_report(report: dict[str, Any], destination: Path, *, format: str) -> Path:
+    if format not in REPORT_FORMATS:
+        raise EclipseError(f"Unsupported report format: {format}")
+    target = destination.expanduser()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if format == "json":
+            target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        elif format == "markdown":
+            target.write_text(report_markdown(report), encoding="utf-8")
+        else:
+            target.write_text(report_html(report), encoding="utf-8")
+    except OSError as error:
+        raise EclipseError(f"Unable to export security report: {error}") from error
+    return target
+
+
+def report_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Eclipse Security Report",
+        "",
+        f"- Created at: {report.get('created_at', '')}",
+        f"- User: {report.get('user', '')}",
+        f"- Score: {report.get('score', '')}/100",
+        f"- Summary: {report.get('summary', {})}",
+        "",
+        "## Findings",
+        "",
+    ]
+    for item in report.get("findings", []):
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"### [{item.get('level', '')}] {item.get('title', '')}")
+        lines.append("")
+        lines.append(f"- ID: {finding_key(item)}")
+        lines.append(f"- Category: {item.get('category', '')}")
+        lines.append(f"- Status: {item.get('status', '')}")
+        if item.get("remediation"):
+            lines.append(f"- Remediation: {item.get('remediation')}")
+        if item.get("detail"):
+            lines.append("")
+            lines.append("```text")
+            lines.append(str(item.get("detail", "")))
+            lines.append("```")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def report_html(report: dict[str, Any]) -> str:
+    rows: list[str] = []
+    for item in report.get("findings", []):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('level', '')))}</td>"
+            f"<td>{html.escape(finding_key(item))}</td>"
+            f"<td>{html.escape(str(item.get('category', '')))}</td>"
+            f"<td>{html.escape(str(item.get('title', '')))}</td>"
+            f"<td>{html.escape(str(item.get('remediation', '')))}</td>"
+            "</tr>"
+        )
+    return (
+        "<!doctype html>\n"
+        "<html><head><meta charset=\"utf-8\"><title>Eclipse Security Report</title>"
+        "<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:32px;line-height:1.4}"
+        "table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}"
+        "th{background:#f5f5f5}</style></head><body>"
+        "<h1>Eclipse Security Report</h1>"
+        f"<p><strong>Created at:</strong> {html.escape(str(report.get('created_at', '')))}<br>"
+        f"<strong>User:</strong> {html.escape(str(report.get('user', '')))}<br>"
+        f"<strong>Score:</strong> {html.escape(str(report.get('score', '')))}/100</p>"
+        "<table><thead><tr><th>Level</th><th>ID</th><th>Category</th><th>Title</th><th>Remediation</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></body></html>\n"
+    )
 
 
 def remediation_plan(findings: Iterable[Finding | dict[str, Any]]) -> list[dict[str, str | int]]:

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -12,6 +13,17 @@ from eclipse.modules.audit import default_log_path, record
 from eclipse.system.errors import EclipseError
 from eclipse.system.memory import default_memory_path
 from eclipse.modules.scripts import default_scripts_home
+
+
+@dataclass(frozen=True)
+class SnapshotInfo:
+    name: str
+    path: Path
+    created_at: str
+    files: int
+    directories: int
+    bytes: int
+    entries: tuple[str, ...]
 
 
 def default_recovery_home() -> Path:
@@ -48,6 +60,93 @@ def snapshot(destination: Path | None = None, *, sources: list[Path] | None = No
         raise EclipseError(f"Unable to create snapshot: {error}") from error
     record("recovery-snapshot", success=True, details={"path": str(target)})
     return target.resolve()
+
+
+def list_snapshots(root: Path | None = None) -> list[SnapshotInfo]:
+    folder = (root or default_recovery_home()).expanduser()
+    if not folder.exists():
+        return []
+    if not folder.is_dir():
+        raise EclipseError(f"Recovery folder is not a directory: {folder}")
+    snapshots: list[SnapshotInfo] = []
+    for path in sorted(folder.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        if path.is_dir() and path.name.startswith("snapshot-"):
+            snapshots.append(snapshot_info(path))
+    return snapshots
+
+
+def snapshot_info(source: Path) -> SnapshotInfo:
+    folder = source.expanduser().resolve()
+    if not folder.is_dir():
+        raise EclipseError(f"Snapshot not found: {folder}")
+    files = 0
+    directories = 0
+    total_bytes = 0
+    entries: list[str] = []
+    for path in sorted(folder.rglob("*"), key=lambda item: item.relative_to(folder).as_posix()):
+        relative = path.relative_to(folder).as_posix()
+        if path.is_dir():
+            directories += 1
+            entries.append(f"{relative}/")
+        elif path.is_file():
+            files += 1
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            total_bytes += size
+            entries.append(f"{relative} ({size} bytes)")
+    try:
+        created_at = datetime.fromtimestamp(folder.stat().st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        created_at = ""
+    return SnapshotInfo(folder.name, folder, created_at, files, directories, total_bytes, tuple(entries))
+
+
+def format_snapshot_list(snapshots: list[SnapshotInfo]) -> str:
+    if not snapshots:
+        return "No snapshots."
+    lines: list[str] = []
+    for item in snapshots:
+        lines.append(f"{item.name}  files={item.files} dirs={item.directories} size={item.bytes} bytes  {item.created_at}")
+        lines.append(f"  {item.path}")
+    return "\n".join(lines)
+
+
+def format_snapshot_info(info: SnapshotInfo, *, limit: int = 200) -> str:
+    lines = [
+        f"Snapshot: {info.name}",
+        f"Path: {info.path}",
+        f"Created at: {info.created_at}",
+        f"Files: {info.files}",
+        f"Directories: {info.directories}",
+        f"Size: {info.bytes} bytes",
+        "",
+        "Contents:",
+    ]
+    if not info.entries:
+        lines.append("  empty")
+    else:
+        for entry in info.entries[:limit]:
+            lines.append(f"  {entry}")
+        hidden = len(info.entries) - limit
+        if hidden > 0:
+            lines.append(f"  ... {hidden} hidden entries")
+    return "\n".join(lines)
+
+
+def resolve_snapshot(value: str | Path, *, root: Path | None = None) -> Path:
+    raw = Path(value).expanduser()
+    if raw.is_absolute() or raw.exists():
+        return raw.resolve()
+    folder = (root or default_recovery_home()).expanduser()
+    direct = folder / raw
+    if direct.exists():
+        return direct.resolve()
+    prefixed = folder / f"snapshot-{raw}"
+    if prefixed.exists():
+        return prefixed.resolve()
+    raise EclipseError(f"Snapshot not found: {value}")
 
 
 def archive_snapshot(source: Path, destination: Path | None = None, *, password: str | None = None) -> Path:

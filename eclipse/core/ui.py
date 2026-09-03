@@ -2,7 +2,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 from eclipse.core import style as ui
-from eclipse.modules.automation import add_job, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
+from eclipse.modules.automation import add_job, format_quickstart, format_suggestions, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
 from eclipse.system.errors import EclipseError
 from eclipse.system.inbox import (
     copy_path,
@@ -27,18 +27,23 @@ from eclipse.system.status import LocalStatus, local_status
 from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
 from eclipse.system.memory import add_memory, filter_memories, load_memories, summarize
 from eclipse.modules.plugins import list_plugins
-from eclipse.system.recovery import archive_snapshot, snapshot
+from eclipse.system.recovery import archive_snapshot, format_snapshot_info, format_snapshot_list, list_snapshots, resolve_snapshot, restore_snapshot, snapshot, snapshot_info
 from eclipse.modules.security import (
     DEFAULT_CHECKS,
+    compare_baseline,
     confirm_password_rotation,
+    format_diff_categories,
     format_findings,
     format_report_diff,
     format_report_history,
+    format_remediation_plan,
     latest_report_pair,
     list_checks,
     load_reports,
     password_status,
+    remediation_plan,
     run_checks,
+    save_baseline,
     write_report,
 )
 from eclipse.modules.scripts import add_script, load_scripts, run_script
@@ -379,25 +384,16 @@ def local_scripts_menu() -> None:
         pause()
 
 
-def security_menu() -> None:
+def security_scans_menu() -> None:
     checks = tuple((check.name, check.label) for check in list_checks())
     while True:
-        header("SECURITY")
-        status = password_status()
-        light = ui.success("GREEN") if status.changed and not status.expired else ui.danger("RED")
-        print(f"  {ui.muted('Passwords')} {light}")
-        if status.next_due_at:
-            print(f"  {ui.muted('Next due date')} {status.next_due_at}")
-        print()
-        print(ui.menu_line("[1]", "Run security scan"))
-        print(ui.menu_line("[2]", "Full JSON report"))
-        print(ui.menu_line("[3]", "Confirm password change"))
-        print(ui.menu_line("[hist]", "Report history"))
-        print(ui.menu_line("[diff]", "Latest report diff"))
-        print(ui.menu_line("[secrets]", "Secret pattern scan"))
-        print(ui.menu_line("[quarantine]", "Downloads quarantine audit"))
-        print(ui.menu_line("[dmg]", "Inspect DMG"))
-        for index, (_, label) in enumerate(checks, 4):
+        header("SECURITY // SCANS")
+        print(ui.menu_line("[1]", "Quick security scan"))
+        print(ui.menu_line("[2]", "Full security scan"))
+        print(ui.menu_line("[3]", "Secret pattern scan"))
+        print(ui.menu_line("[4]", "Downloads quarantine audit"))
+        print(ui.menu_line("[5]", "Inspect DMG"))
+        for index, (_, label) in enumerate(checks, 6):
             print(ui.menu_line(f"[{index}]", label))
         print(ui.menu_line("[0]", "Back"), "\n")
         choice = input(ui.prompt()).strip()
@@ -409,31 +405,20 @@ def security_menu() -> None:
             print(format_findings(findings))
         elif choice == "2":
             findings = run_checks(DEFAULT_CHECKS)
-            print(f"\n  {ui.success('●')} Report: {write_report(findings)}")
+            print()
+            print(format_findings(findings))
         elif choice == "3":
-            answer = input(ui.prompt("Have you changed your passwords? [yes/N]"))
-            if is_yes(answer):
-                updated = confirm_password_rotation()
-                print(f"\n  {ui.success('●')} Confirmed until {updated.next_due_at}")
-        elif choice == "hist":
-            print()
-            print(format_report_history(load_reports(limit=10)))
-        elif choice == "diff":
-            print()
-            previous, current = latest_report_pair()
-            print(format_report_diff(previous, current))
-        elif choice == "secrets":
             path = Path(input(ui.prompt("Folder")).strip() or str(Path.cwd()))
             limit = input(ui.prompt("Limit")).strip() or "100"
             result = run_script("find-secrets-local", arguments=["--path", str(path), "--limit", limit], force=True)
             if result.returncode:
                 raise EclipseError(f"Secret scan failed with code {result.returncode}.")
-        elif choice == "quarantine":
+        elif choice == "4":
             folder = Path(input(ui.prompt("Downloads folder")).strip() or str(Path.home() / "Downloads"))
             result = run_script("quarantine-downloads-audit", arguments=["--folder", str(folder)], force=True)
             if result.returncode:
                 raise EclipseError(f"Downloads quarantine audit failed with code {result.returncode}.")
-        elif choice == "dmg":
+        elif choice == "5":
             path = Path(input(ui.prompt("DMG path")).strip())
             open_after = is_yes(input(ui.prompt("Open after inspection [yes/N]")))
             arguments = ["--file", str(path)]
@@ -442,11 +427,66 @@ def security_menu() -> None:
             result = run_script("safe-open-dmg", arguments=arguments, force=True)
             if result.returncode:
                 raise EclipseError(f"DMG inspection failed with code {result.returncode}.")
-        elif choice.isdigit() and 4 <= int(choice) < 4 + len(checks):
-            check = checks[int(choice) - 4][0]
+        elif choice.isdigit() and 6 <= int(choice) < 6 + len(checks):
+            check = checks[int(choice) - 6][0]
             findings = run_checks((check,))
             print()
             print(format_findings(findings))
+        else:
+            print(ui.danger("Invalid choice."))
+        pause()
+
+
+def security_menu() -> None:
+    while True:
+        header("SECURITY")
+        status = password_status()
+        light = ui.success("GREEN") if status.changed and not status.expired else ui.danger("RED")
+        print(f"  {ui.muted('Passwords')} {light}")
+        if status.next_due_at:
+            print(f"  {ui.muted('Next due date')} {status.next_due_at}")
+        print()
+        print(ui.menu_line("[1]", "Scans"))
+        print(ui.menu_line("[2]", "Full JSON report"))
+        print(ui.menu_line("[3]", "Confirm password change"))
+        print(ui.menu_line("[4]", "Report history"))
+        print(ui.menu_line("[5]", "Latest report diff"))
+        print(ui.menu_line("[6]", "Remediation plan"))
+        print(ui.menu_line("[7]", "Save baseline"))
+        print(ui.menu_line("[8]", "Compare baseline"))
+        print(ui.menu_line("[0]", "Back"), "\n")
+        choice = input(ui.prompt()).strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            security_scans_menu()
+            continue
+        elif choice == "2":
+            findings = run_checks(DEFAULT_CHECKS)
+            print(f"\n  {ui.success('●')} Report: {write_report(findings)}")
+        elif choice == "3":
+            answer = input(ui.prompt("Have you changed your passwords? [yes/N]"))
+            if is_yes(answer):
+                updated = confirm_password_rotation()
+                print(f"\n  {ui.success('●')} Confirmed until {updated.next_due_at}")
+        elif choice == "4":
+            print()
+            print(format_report_history(load_reports(limit=10)))
+        elif choice == "5":
+            print()
+            previous, current = latest_report_pair()
+            print(format_report_diff(previous, current))
+        elif choice == "6":
+            findings = run_checks(DEFAULT_CHECKS)
+            print()
+            print(format_remediation_plan(remediation_plan(findings)))
+        elif choice == "7":
+            findings = run_checks(DEFAULT_CHECKS)
+            print(f"\n  {ui.success('●')} Baseline: {save_baseline(findings)}")
+        elif choice == "8":
+            findings = run_checks(DEFAULT_CHECKS)
+            print("\nBaseline comparison:")
+            print(format_diff_categories(compare_baseline(findings)))
         else:
             print(ui.danger("Invalid choice."))
         pause()
@@ -462,8 +502,12 @@ def automation_menu() -> None:
                 print(ui.menu_line(f"[{index}]", f"{job.name} · {state} · every {job.every}"))
         else:
             print(f"  {ui.muted('No automation.')}")
+            print()
+            print("\n".join(f"  {line}" for line in format_suggestions().splitlines()))
         print()
         print(ui.menu_line("[add]", "add"))
+        print(ui.menu_line("[suggest]", "suggestions"))
+        print(ui.menu_line("[quick]", "quickstart"))
         print(ui.menu_line("[run]", "run"))
         print(ui.menu_line("[due]", "run due automations"))
         print(ui.menu_line("[off]", "disable"))
@@ -479,6 +523,12 @@ def automation_menu() -> None:
             command = input(ui.prompt("Optional Eclipse command")).strip()
             job = add_job(name, every=every, command=shlex.split(command) if command else None)
             print(f"  {ui.success('●')} Automation added: {job.name}")
+        elif choice == "suggest":
+            print()
+            print("\n".join(f"  {line}" for line in format_suggestions().splitlines()))
+        elif choice == "quick":
+            print()
+            print("\n".join(f"  {line}" for line in format_quickstart().splitlines()))
         elif choice == "run":
             name = input(ui.prompt("Name")).strip()
             dry = is_yes(input(ui.prompt("Dry-run [yes/N]")))
@@ -517,6 +567,8 @@ def recovery_menu() -> None:
         header("RECOVERY // BACKUP")
         print(ui.menu_line("[1]", "Create snapshot"))
         print(ui.menu_line("[2]", "Export snapshot"))
+        print(ui.menu_line("[3]", "View snapshots"))
+        print(ui.menu_line("[4]", "Load snapshot"))
         print(ui.menu_line("[0]", "Back"), "\n")
         choice = input(ui.prompt()).strip()
         if choice == "0":
@@ -527,6 +579,20 @@ def recovery_menu() -> None:
             path = Path(input(ui.prompt("Snapshot")).strip())
             password = input(ui.prompt("Optional password")).strip()
             print(f"  {ui.success('●')} Export : {archive_snapshot(path, password=password or None)}")
+        elif choice == "3":
+            snapshots = list_snapshots()
+            print()
+            print(format_snapshot_list(snapshots))
+            selected = input(ui.prompt("Snapshot to inspect, optional")).strip()
+            if selected:
+                print()
+                print(format_snapshot_info(snapshot_info(resolve_snapshot(selected)), limit=200))
+        elif choice == "4":
+            selected = input(ui.prompt("Snapshot name or path")).strip()
+            destination = input(ui.prompt("Destination folder optional")).strip()
+            if is_yes(input(ui.prompt("Load this snapshot [yes/N]"))):
+                loaded = restore_snapshot(resolve_snapshot(selected), Path(destination) if destination else None, confirmed=True)
+                print(f"  {ui.success('●')} Load : {loaded}")
         else:
             print(ui.danger("Invalid choice."))
         pause()
