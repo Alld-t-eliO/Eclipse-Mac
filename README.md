@@ -45,8 +45,7 @@ each check. Windows and Linux are not supported targets.
 
 ## First run
 
-The **TODAY** screen shows saved scan alerts, changes across reports covering the
-same categories, and recent local activity. No security scan runs automatically
+The **TODAY** screen shows saved scan alerts, changes across scans with matching recorded checks, scan mode and check revision, and recent local activity. No security scan runs automatically
 when you open it. With no report yet, choose **1**.
 
 | Key | Action |
@@ -60,46 +59,42 @@ when you open it. With no report yet, choose **1**.
 | `r` | Refresh the overview |
 | `0` | Quit |
 
-After a scan, a short summary separates passed checks, findings to review, and
+During interactive scans, Eclipse prints the current check and its completion state.
+A failed check does not prevent the remaining checks from running. After a scan, a short summary separates passed checks, findings to review, and
 skipped or uncertain checks. Press **d** for technical details, **a** for suggested
 actions, or **Enter** to return. Scans inspect settings; they do not apply the
 suggested changes. The slower macOS update lookup requires `eclipse security scan --deep`.
 
 The detailed security score is a heuristic over reported findings, not a guarantee
 of security. Inventory and unavailable checks are distinguished. Old saved reports
-keep their original classifications; run a new scan after updating Eclipse.
+keep their original classifications. New reports record execution coverage (schema 3).
+The overview compares only checks completed in both matching scans; skipped,
+failed and incomplete checks are shown as not comparable. Run two new scans to
+start this comparison history. CLI diffs can still show explicit changes between
+two legacy reports, but do not treat absent findings as resolved alerts.
+
+The overview and menu headers avoid detailed GPU/network queries. Detailed Mac
+status is cached for up to 15 seconds; `r` and interactive scans clear the cache.
+A new scan always executes its checks; identical commands within that scan reuse
+their result. No scan results are reused across separate scans.
 
 ## Screenshots
 
-The image below shows the **earlier tools menu**, not the current TODAY screen.
-It is retained as a visual reference for Eclipse's terminal styling.
+The computer names in these screenshots have been replaced with a generic demo name.
 
-![Earlier Eclipse terminal tools menu](docs/images/eclipse-control-center.png)
+### Home — TODAY
 
-### Add current screenshots here
+The daily overview brings saved scan alerts, changes and recent activity together,
+with shortcuts to scan the Mac, review findings and create a recovery snapshot.
 
-Save PNG images in `docs/images/` using the following names. Once a file exists,
-uncomment its Markdown line below. These slots deliberately do not display broken
-images while screenshots are still missing.
+![Eclipse home screen with saved scan alerts, recent activity and quick actions](docs/images/eclipse-today.png)
 
-| File to add | What to capture |
-| --- | --- |
-| `docs/images/eclipse-today.png` | TODAY screen after a saved scan |
-| `docs/images/eclipse-scan-summary.png` | Short scan summary and details/actions prompt |
-| `docs/images/eclipse-all-tools.png` | All tools menu opened with `t` |
-| `docs/images/eclipse-files.png` | File explorer using a sample folder |
-| `docs/images/eclipse-recovery.png` | Snapshot list with sample data |
+### All tools
 
-<!-- Uncomment each line only after adding its PNG file. -->
-<!-- ![Daily overview](docs/images/eclipse-today.png) -->
-<!-- ![Scan summary](docs/images/eclipse-scan-summary.png) -->
-<!-- ![All tools](docs/images/eclipse-all-tools.png) -->
-<!-- ![Local file explorer](docs/images/eclipse-files.png) -->
-<!-- ![Recovery snapshots](docs/images/eclipse-recovery.png) -->
+The tools menu gives access to every module, alongside a compact view of the Mac's
+memory, storage and system information.
 
-[Capture instructions and publication checklist](docs/screenshots.md).
-Use real captures of the current version, with personal paths, hostnames and
-network details removed or replaced with clearly identified demo data.
+![Eclipse all tools menu with module shortcuts and Mac system information](docs/images/eclipse-all-tools.png)
 
 ## What Eclipse does
 
