@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from eclipse.system.errors import EclipseError
+from eclipse.system.storage import atomic_write, serialized
 
 
 MAX_TEXT_LENGTH = 20_000
@@ -74,6 +75,7 @@ def normalize_tags(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(tags)
 
 
+@serialized(lambda options: options.get("path") or default_memory_path())
 def add_memory(
     text: str,
     *,
@@ -100,10 +102,16 @@ def add_memory(
 
 
 def write_entry(entry: MemoryEntry, path: Path) -> None:
+    entries = load_memories(path)
+    entries.append(entry)
+    write_entries(entries, path)
+
+
+def write_entries(entries: Iterable[MemoryEntry], path: Path) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(entry.to_record(), ensure_ascii=False) + "\n")
+        content = "".join(json.dumps(entry.to_record(), ensure_ascii=False) + "\n" for entry in entries)
+        atomic_write(path, content)
         path.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write memory: {error}") from error
@@ -161,10 +169,108 @@ def export_json(destination: Path, *, path: Path | None = None) -> Path:
     target = destination.expanduser()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(target, json.dumps(records, ensure_ascii=False, indent=2) + "\n")
     except OSError as error:
         raise EclipseError(f"Unable to export memory: {error}") from error
     return target
+
+
+@serialized(lambda options: options.get("path") or default_memory_path())
+def update_memory(
+    memory_id: str,
+    *,
+    text: str | None = None,
+    tags: Iterable[str] | None = None,
+    source: str | None = None,
+    project: str | None = None,
+    path: Path | None = None,
+) -> MemoryEntry:
+    target_id = memory_id.strip()
+    if not target_id:
+        raise EclipseError("Memory id is required.")
+    entries = load_memories(path)
+    updated: MemoryEntry | None = None
+    rewritten: list[MemoryEntry] = []
+    for entry in entries:
+        if entry.id != target_id:
+            rewritten.append(entry)
+            continue
+        next_text = entry.text if text is None else text.strip()
+        if not next_text:
+            raise EclipseError("Memory cannot be empty.")
+        if len(next_text) > MAX_TEXT_LENGTH:
+            raise EclipseError(f"Memory is too long: maximum {MAX_TEXT_LENGTH} characters.")
+        updated = MemoryEntry(
+            id=entry.id,
+            created_at=entry.created_at,
+            text=next_text,
+            tags=entry.tags if tags is None else normalize_tags(tags),
+            source=entry.source if source is None else (source.strip() or None),
+            project=entry.project if project is None else (project.strip() or None),
+        )
+        rewritten.append(updated)
+    if updated is None:
+        raise EclipseError(f"Memory not found: {target_id}")
+    write_entries(rewritten, path or default_memory_path())
+    return updated
+
+
+@serialized(lambda options: options.get("path") or default_memory_path())
+def delete_memory(memory_id: str, *, path: Path | None = None) -> MemoryEntry:
+    target_id = memory_id.strip()
+    if not target_id:
+        raise EclipseError("Memory id is required.")
+    entries = load_memories(path)
+    deleted: MemoryEntry | None = None
+    kept: list[MemoryEntry] = []
+    for entry in entries:
+        if entry.id == target_id:
+            deleted = entry
+        else:
+            kept.append(entry)
+    if deleted is None:
+        raise EclipseError(f"Memory not found: {target_id}")
+    write_entries(kept, path or default_memory_path())
+    return deleted
+
+
+def list_tags(entries: Iterable[MemoryEntry]) -> list[tuple[str, int]]:
+    counts = summarize(entries)["tags"]
+    if not isinstance(counts, dict):
+        return []
+    return sorted(((str(tag), int(count)) for tag, count in counts.items()), key=lambda item: (-item[1], item[0]))
+
+
+def list_projects(entries: Iterable[MemoryEntry]) -> list[tuple[str, int]]:
+    counts = summarize(entries)["projects"]
+    if not isinstance(counts, dict):
+        return []
+    return sorted(((str(project), int(count)) for project, count in counts.items()), key=lambda item: (-item[1], item[0]))
+
+
+def memory_guide() -> str:
+    return "\n".join(
+        [
+            "Local Memory is a private local notebook for useful Eclipse context.",
+            "",
+            "Good entries:",
+            "- decisions you do not want to forget",
+            "- project notes and setup details",
+            "- security observations and follow-up tasks",
+            "- commands or paths you reuse often",
+            "",
+            "Beginner commands:",
+            "eclipse memory add \"Use snapshots before risky changes\" --tag backup,safety --project eclipse",
+            "eclipse memory list --limit 10",
+            "eclipse memory search snapshot --project eclipse",
+            "eclipse memory tags",
+            "eclipse memory projects",
+            "eclipse memory export ~/Desktop/eclipse-memory.json",
+            "",
+            "Storage:",
+            str(default_memory_path()),
+        ]
+    )
 
 
 def summarize(entries: Iterable[MemoryEntry]) -> dict[str, object]:

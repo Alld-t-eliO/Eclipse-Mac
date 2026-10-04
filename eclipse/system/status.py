@@ -56,8 +56,8 @@ class LocalStatus:
 
 def run_text(command: list[str]) -> str:
     try:
-        completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    except OSError:
+        completed = subprocess.run(command, check=False, text=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
         return ""
     if completed.returncode:
         return ""

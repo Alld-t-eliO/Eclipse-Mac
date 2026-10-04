@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
 import getpass
+import sys
+from itertools import islice
 import os
 import re
 import shutil
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from eclipse.modules.audit import record
 from eclipse.system.errors import EclipseError
+from eclipse.system.storage import atomic_write, serialized
 from eclipse.system.runner import Result, shell_display
 
 
@@ -87,7 +90,7 @@ def package_scripts_dir() -> Path:
 
 
 def project_scripts_dirs() -> tuple[Path, ...]:
-    return (project_scripts_dir(), package_scripts_dir())
+    return (Path(__file__).resolve().parents[2] / "scripts", project_scripts_dir(), package_scripts_dir())
 
 
 def files_dir(root: Path | None = None) -> Path:
@@ -149,7 +152,8 @@ def safe_dropin_name(path: Path, used: set[str]) -> str:
 def metadata_from_comments(path: Path) -> dict[str, Any]:
     metadata: dict[str, Any] = {"parameters": [], "tags": []}
     try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[:40]
+        with path.open(encoding="utf-8", errors="ignore") as stream:
+            lines = list(islice(stream, 40))
     except OSError:
         return metadata
     for line in lines:
@@ -209,7 +213,7 @@ def load_history(root: Path | None = None, *, limit: int = 20) -> list[dict[str,
 
 def last_status(name: str, root: Path | None = None) -> tuple[str | None, int | None]:
     for item in reversed(load_history(root, limit=1000)):
-        if item.get("script") == name:
+        if item.get("script") == name and not item.get("dry_run"):
             code = item.get("returncode")
             return str(item.get("timestamp")) if item.get("timestamp") else None, int(code) if code is not None else None
     return None, None
@@ -305,12 +309,13 @@ def save_scripts(scripts: dict[str, LocalScript], root: Path | None = None) -> N
     ]
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(path, json.dumps(records, ensure_ascii=False, indent=2) + "\n")
         path.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write scripts registry: {error}") from error
 
 
+@serialized(lambda options: registry_path(options.get("root")))
 def add_script(
     name: str,
     source: Path,
@@ -352,6 +357,7 @@ def add_script(
     return script
 
 
+@serialized(lambda options: registry_path(options.get("root")))
 def remove_script(name: str, *, root: Path | None = None, delete_file: bool = False) -> LocalScript:
     clean_name = validate_name(name)
     home = (root or default_scripts_home()).expanduser().resolve()
@@ -383,6 +389,15 @@ def command_for(script: LocalScript, arguments: list[str]) -> list[str]:
     if not script.path.exists() or not script.path.is_file():
         raise EclipseError(f"Missing script file: {script.path}")
     interpreter = INTERPRETERS.get(script.path.suffix.lower())
+    if script.path.suffix.lower() == ".py":
+        interpreter = sys.executable
+    if script.path.suffix.lower() == ".sh":
+        with script.path.open("rb") as stream:
+            shebang = stream.readline(256).decode("ascii", errors="ignore").strip()
+        if shebang in {"#!/usr/bin/env bash", "#!/bin/bash"}:
+            interpreter = "bash"
+        elif shebang in {"#!/usr/bin/env zsh", "#!/bin/zsh"}:
+            interpreter = "zsh"
     if interpreter:
         return [interpreter, str(script.path), *arguments]
     return [str(script.path), *arguments]

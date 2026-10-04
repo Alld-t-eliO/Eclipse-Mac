@@ -1,6 +1,11 @@
 from __future__ import annotations
+
+from getpass import getpass
 import shlex
+import shutil
+import textwrap
 from pathlib import Path
+from eclipse.core.dashboard import load_overview, report_findings
 from eclipse.core import style as ui
 from eclipse.modules.automation import add_job, format_quickstart, format_suggestions, load_history as load_automation_history, load_jobs, run_due, run_job, set_enabled
 from eclipse.system.errors import EclipseError
@@ -25,7 +30,7 @@ from eclipse.system.inbox import (
 )
 from eclipse.system.status import LocalStatus, local_status
 from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
-from eclipse.system.memory import add_memory, filter_memories, load_memories, summarize
+from eclipse.system.memory import add_memory, delete_memory, export_json, filter_memories, list_projects, list_tags, load_memories, memory_guide, summarize, update_memory
 from eclipse.modules.plugins import list_plugins
 from eclipse.system.recovery import archive_snapshot, format_snapshot_info, format_snapshot_list, list_snapshots, resolve_snapshot, restore_snapshot, snapshot, snapshot_info
 from eclipse.modules.security import (
@@ -34,6 +39,7 @@ from eclipse.modules.security import (
     confirm_password_rotation,
     format_diff_categories,
     format_findings,
+    format_scan_summary,
     format_report_diff,
     format_report_history,
     format_remediation_plan,
@@ -74,8 +80,8 @@ def is_yes(value: str) -> bool:
     return value.strip().lower() in {"y", "yes", "oui"}
 
 
-def header(title: str = "CONTROL CENTER") -> None:
-    status = local_status()
+def header(title: str = "CONTROL CENTER", *, status: LocalStatus | None = None) -> None:
+    status = status or local_status()
     passwords = password_status()
     password_light = ui.success("● PWD OK") if passwords.changed and not passwords.expired else ui.danger("● PWD CHANGE DUE")
     ui.clear()
@@ -313,12 +319,20 @@ def memory_menu() -> None:
     while True:
         header("MEMORY // LOCAL MAC")
         data = summarize(load_memories())
+        print(f"  {ui.muted('Private local notebook for decisions, project context, commands, and follow-ups.')}")
+        print()
         print(f"  {ui.muted('Entries')} {ui.accent(data['count'])}")
         print(f"  {ui.muted('Tags')}    {data['tags'] or '{}'}")
         print(f"  {ui.muted('Projects')} {data['projects'] or '{}'}\n")
         print(ui.menu_line("[1]", "List latest memories"))
         print(ui.menu_line("[2]", "Search memory"))
         print(ui.menu_line("[3]", "Add memory"))
+        print(ui.menu_line("[4]", "Tags"))
+        print(ui.menu_line("[5]", "Projects"))
+        print(ui.menu_line("[6]", "Update memory"))
+        print(ui.menu_line("[7]", "Delete memory"))
+        print(ui.menu_line("[8]", "Export memory"))
+        print(ui.menu_line("[9]", "Beginner guide"))
         print(ui.menu_line("[0]", "Back"), "\n")
         choice = input(ui.prompt()).strip()
         if choice == "0":
@@ -332,8 +346,61 @@ def memory_menu() -> None:
             text = input(ui.prompt("Text")).strip()
             tags = input(ui.prompt("Tags")).strip()
             project = input(ui.prompt("Project")).strip()
-            entry = add_memory(text, tags=[tags] if tags else [], project=project or None, source="eclipse-ui")
+            source = input(ui.prompt("Source")).strip()
+            entry = add_memory(text, tags=[tags] if tags else [], project=project or None, source=source or "eclipse-ui")
             print(f"  {ui.success('●')} Memory added: {entry.id}")
+            pause()
+            continue
+        elif choice == "4":
+            print()
+            rows = list_tags(load_memories())
+            if not rows:
+                print(f"  {ui.muted('No tags.')}")
+            for tag, count in rows:
+                print(f"  {ui.accent(tag)} {ui.muted(str(count))}")
+            pause()
+            continue
+        elif choice == "5":
+            print()
+            rows = list_projects(load_memories())
+            if not rows:
+                print(f"  {ui.muted('No projects.')}")
+            for project, count in rows:
+                print(f"  {ui.accent(project)} {ui.muted(str(count))}")
+            pause()
+            continue
+        elif choice == "6":
+            memory_id = input(ui.prompt("Memory id")).strip()
+            text = input(ui.prompt("New text (leave blank to keep)")).strip()
+            tags = input(ui.prompt("New tags (leave blank to keep)")).strip()
+            project = input(ui.prompt("New project (leave blank to keep)")).strip()
+            source = input(ui.prompt("New source (leave blank to keep)")).strip()
+            entry = update_memory(
+                memory_id,
+                text=text or None,
+                tags=[tags] if tags else None,
+                project=project or None,
+                source=source or None,
+            )
+            print(f"  {ui.success('●')} Memory updated: {entry.id}")
+            pause()
+            continue
+        elif choice == "7":
+            memory_id = input(ui.prompt("Memory id")).strip()
+            answer = input(ui.prompt("Delete this memory [yes/N]"))
+            if is_yes(answer):
+                entry = delete_memory(memory_id)
+                print(f"  {ui.success('●')} Memory deleted: {entry.id}")
+            pause()
+            continue
+        elif choice == "8":
+            destination = Path(input(ui.prompt("Destination JSON")).strip() or str(Path.home() / "Desktop" / "eclipse-memory.json"))
+            print(f"  {ui.success('●')} Export: {export_json(destination)}")
+            pause()
+            continue
+        elif choice == "9":
+            print()
+            print("\n".join(f"  {line}" for line in memory_guide().splitlines()))
             pause()
             continue
         else:
@@ -400,13 +467,9 @@ def security_scans_menu() -> None:
         if choice == "0":
             return
         if choice == "1":
-            findings = run_checks(("security", "firewall", "sharing", "updates"))
-            print()
-            print(format_findings(findings))
+            scan_and_save(("security", "firewall", "sharing", "updates"))
         elif choice == "2":
-            findings = run_checks(DEFAULT_CHECKS)
-            print()
-            print(format_findings(findings))
+            scan_and_save(DEFAULT_CHECKS)
         elif choice == "3":
             path = Path(input(ui.prompt("Folder")).strip() or str(Path.cwd()))
             limit = input(ui.prompt("Limit")).strip() or "100"
@@ -429,9 +492,7 @@ def security_scans_menu() -> None:
                 raise EclipseError(f"DMG inspection failed with code {result.returncode}.")
         elif choice.isdigit() and 6 <= int(choice) < 6 + len(checks):
             check = checks[int(choice) - 6][0]
-            findings = run_checks((check,))
-            print()
-            print(format_findings(findings))
+            scan_and_save((check,))
         else:
             print(ui.danger("Invalid choice."))
         pause()
@@ -577,7 +638,7 @@ def recovery_menu() -> None:
             print(f"  {ui.success('●')} Snapshot : {snapshot()}")
         elif choice == "2":
             path = Path(input(ui.prompt("Snapshot")).strip())
-            password = input(ui.prompt("Optional password")).strip()
+            password = getpass("Optional password: ")
             print(f"  {ui.success('●')} Export : {archive_snapshot(path, password=password or None)}")
         elif choice == "3":
             snapshots = list_snapshots()
@@ -672,11 +733,10 @@ def vps_menu() -> None:
         pause()
 
 
-def launch() -> None:
-    ui.boot_animation()
+def tools_menu() -> None:
     while True:
         status = local_status()
-        header()
+        header("ALL TOOLS", status=status)
         menu = [
             ui.menu_line("[1]", "Mac status"),
             ui.menu_line("[2]", "Local files"),
@@ -688,13 +748,12 @@ def launch() -> None:
             ui.menu_line("[8]", "Recovery"),
             ui.menu_line("[9]", "Logs"),
             ui.menu_line("[10]", "VPS"),
-            ui.menu_line("[0]", "Quit", danger_action=True),
+            ui.menu_line("[0]", "Back"),
         ]
         ui.columns(menu, local_panel(status))
         print()
         choice = input(ui.prompt()).strip()
         if choice == "0":
-            print(f"\n  {ui.neon('ECLIPSE//SHUTDOWN')} {ui.success('● CLEAN EXIT')}")
             return
         actions = {
             "1": local_status_menu,
@@ -717,4 +776,91 @@ def launch() -> None:
             action()
         except EclipseError as error:
             print(ui.danger(f"\n  ✗ {error}"))
+        pause()
+
+
+def scan_and_save(checks=DEFAULT_CHECKS) -> None:
+    findings = run_checks(checks)
+    path = write_report(findings)
+    print(format_scan_summary(findings))
+    print(f"\n  Saved report: {path}")
+    while True:
+        choice = input(ui.prompt("[d] Technical details · [a] Suggested actions · Enter to return")).strip().lower()
+        if not choice:
+            return
+        if choice == "d":
+            print(format_findings(findings))
+        elif choice == "a":
+            print(format_remediation_plan(remediation_plan(findings)))
+        else:
+            print(ui.danger("Choose d, a, or press Enter."))
+
+
+def review_latest_scan() -> None:
+    reports = load_reports(limit=1)
+    if not reports:
+        print("No saved scan yet. Choose [1] Check my Mac first.")
+        return
+    report = reports[-1]
+    print(f"Saved scan: {report.get('created_at', 'unknown date')}")
+    rows = report_findings(report)
+    for row in rows:
+        if row.get("level") == "OK":
+            continue
+        print(f"\n[{row.get('level', 'INFO')}] {row.get('title', 'Finding')}")
+        evidence = str(row.get("evidence") or row.get("detail") or "No evidence recorded.")
+        print(evidence)
+    print(format_remediation_plan(remediation_plan(rows)))
+    print(f"\nFull saved report: {report.get('_path', 'unavailable')}")
+    print("Suggested actions only; no system settings have been changed.")
+
+
+def daily_snapshot() -> None:
+    print(f"Snapshot saved: {snapshot()}")
+
+
+def launch() -> None:
+    ui.boot_animation()
+    while True:
+        try:
+            status = local_status()
+            header("TODAY", status=status)
+            overview = load_overview()
+            if status.disk.percent >= 90:
+                overview.attention.insert(0, f"Disk {status.disk.percent:.0f}% full — review files in [t] All tools.")
+            for title, lines in (
+                ("NEEDS ATTENTION", overview.attention),
+                ("WHAT CHANGED", overview.changes),
+                ("RECENT ACTIVITY", overview.activity or ["No recorded activity yet."]),
+            ):
+                print(f"  {ui.neon(title, bold=True)}")
+                for line in lines:
+                    print(textwrap.fill(line, width=max(30, shutil.get_terminal_size().columns - 2),
+                                        initial_indent="  ", subsequent_indent="    "))
+                print()
+            print(ui.menu_line("[1]", "Check my Mac · scan and save"))
+            print(ui.menu_line("[2]", "Understand alerts · suggested actions"))
+            print(ui.menu_line("[3]", "Save an Eclipse recovery snapshot"))
+            print(ui.menu_line("[4]", "Review automations"))
+            print(ui.menu_line("[5]", "Browse activity history"))
+            print(ui.menu_line("[t]", "All tools"))
+            print(ui.menu_line("[r]", "Refresh"))
+            print(ui.menu_line("[0]", "Quit", danger_action=True))
+            choice = input(ui.prompt()).strip().lower()
+            if choice == "0":
+                print(f"\n  {ui.neon('ECLIPSE//SHUTDOWN')} {ui.success('● CLEAN EXIT')}")
+                return
+            if choice == "r":
+                continue
+            actions = {"1": scan_and_save, "2": review_latest_scan, "3": daily_snapshot,
+                       "4": automation_menu, "5": logs_menu, "t": tools_menu}
+            action = actions.get(choice)
+            if action is None:
+                print(ui.danger("Invalid choice."))
+            else:
+                action()
+            if choice in {"1", "t", "4"}:
+                continue
+        except (EclipseError, OSError) as error:
+            print(ui.danger(f"\n  Unable to complete action: {error}"))
         pause()

@@ -27,7 +27,19 @@ from eclipse.system.inbox import (
 )
 from eclipse.system.status import common_folders, local_status
 from eclipse.core.logs import LOG_SOURCES, collect_logs, export_logs, format_log
-from eclipse.system.memory import MemoryEntry, add_memory, export_json, filter_memories, load_memories, summarize
+from eclipse.system.memory import (
+    MemoryEntry,
+    add_memory,
+    delete_memory,
+    export_json,
+    filter_memories,
+    list_projects,
+    list_tags,
+    load_memories,
+    memory_guide,
+    summarize,
+    update_memory,
+)
 from eclipse.modules.plugins import create_plugin, list_plugins
 from eclipse.system.recovery import archive_snapshot, format_snapshot_info, format_snapshot_list, list_snapshots, resolve_snapshot, restore_snapshot, snapshot, snapshot_info
 from eclipse.modules.security import (
@@ -266,6 +278,20 @@ def parser() -> argparse.ArgumentParser:
     item = memory_commands.add_parser("export", help="export memory as JSON")
     item.add_argument("destination", type=Path)
 
+    item = memory_commands.add_parser("update", help="update a memory entry")
+    item.add_argument("id")
+    item.add_argument("--text")
+    item.add_argument("--tag", action="append", help="replace tags, repeatable or comma-separated")
+    item.add_argument("--source", help="replace source, use an empty value to clear")
+    item.add_argument("--project", help="replace project, use an empty value to clear")
+
+    item = memory_commands.add_parser("delete", help="delete a memory entry")
+    item.add_argument("id")
+    item.add_argument("--yes", action="store_true")
+
+    memory_commands.add_parser("tags", help="list memory tags")
+    memory_commands.add_parser("projects", help="list memory projects")
+    memory_commands.add_parser("guide", help="explain local memory with beginner commands")
     memory_commands.add_parser("stats", help="summarize local memory")
 
     scripts = commands.add_parser("scripts", aliases=["script"], help="store and run local macOS scripts")
@@ -340,13 +366,15 @@ def parser() -> argparse.ArgumentParser:
     item = recovery_commands.add_parser("export", help="export a snapshot as an archive")
     item.add_argument("snapshot", type=Path)
     item.add_argument("--destination", type=Path)
-    item.add_argument("--password", help="password for simple encrypted export")
+    item.add_argument("--password", help="password for authenticated AES-GCM encryption")
     item = recovery_commands.add_parser("load", help="load a snapshot into a destination folder")
+    item.add_argument("--password", help="encrypted archive password")
     item.add_argument("snapshot")
     item.add_argument("--destination", type=Path)
     item.add_argument("--root", type=Path, help="recovery folder used for snapshot names")
     item.add_argument("--yes", action="store_true")
     item = recovery_commands.add_parser("restore", help="restore a snapshot to a directory")
+    item.add_argument("--password", help="encrypted archive password")
     item.add_argument("snapshot", type=Path)
     item.add_argument("--destination", type=Path)
     item.add_argument("--yes", action="store_true")
@@ -548,7 +576,10 @@ def dispatch(args: argparse.Namespace) -> None:
                 print(format_policy(load_policy(args.path)))
             elif args.policy_command == "check":
                 findings = run_checks(args.check or DEFAULT_CHECKS, deep=args.deep)
-                print(format_policy_evaluation(evaluate_policy(findings, load_policy(args.path), checks=args.check or DEFAULT_CHECKS)))
+                evaluation = evaluate_policy(findings, load_policy(args.path), checks=args.check or DEFAULT_CHECKS)
+                print(format_policy_evaluation(evaluation))
+                if evaluation["alerts"] or evaluation["missing_required_checks"]:
+                    raise EclipseError("Security policy requirements were not met.")
         elif args.security_command == "report":
             if args.report_command == "export":
                 print(f"Report export: {export_report(load_latest_report(args.report_dir), args.output, format=args.format)}")
@@ -607,6 +638,36 @@ def dispatch(args: argparse.Namespace) -> None:
             print_memory(entries, limit=args.limit)
         elif args.memory_command == "export":
             print(f"Export : {export_json(args.destination)}")
+        elif args.memory_command == "update":
+            if args.text is None and args.tag is None and args.source is None and args.project is None:
+                raise EclipseError("Provide --text, --tag, --source, or --project.")
+            entry = update_memory(
+                args.id,
+                text=args.text,
+                tags=args.tag,
+                source=args.source,
+                project=args.project,
+            )
+            print(f"Memory updated: {entry.id}")
+        elif args.memory_command == "delete":
+            if not args.yes:
+                raise EclipseError("Deletion requires --yes.")
+            entry = delete_memory(args.id)
+            print(f"Memory deleted: {entry.id}")
+        elif args.memory_command == "tags":
+            rows = list_tags(load_memories())
+            if not rows:
+                print("No tags.")
+            for tag, count in rows:
+                print(f"{tag}: {count}")
+        elif args.memory_command == "projects":
+            rows = list_projects(load_memories())
+            if not rows:
+                print("No projects.")
+            for project, count in rows:
+                print(f"{project}: {count}")
+        elif args.memory_command == "guide":
+            print(memory_guide())
         elif args.memory_command == "stats":
             data = summarize(load_memories())
             print(f"Memories: {data['count']}")
@@ -694,6 +755,8 @@ def dispatch(args: argparse.Namespace) -> None:
                 print(f"{job.name}: code={result.returncode}")
                 if args.dry_run and result.stdout:
                     print(f"  {result.stdout}")
+            if any(result.returncode for _, result in rows):
+                raise EclipseError("One or more due automations failed.")
         elif args.automation_command == "enable":
             print(f"Automation enabled: {set_enabled(args.name, True).name}")
         elif args.automation_command == "disable":
@@ -726,9 +789,9 @@ def dispatch(args: argparse.Namespace) -> None:
         elif args.recovery_command == "export":
             print(f"Export : {archive_snapshot(args.snapshot, args.destination, password=args.password)}")
         elif args.recovery_command == "load":
-            print(f"Load : {restore_snapshot(resolve_snapshot(args.snapshot, root=args.root), args.destination, confirmed=args.yes)}")
+            print(f"Load : {restore_snapshot(resolve_snapshot(args.snapshot, root=args.root), args.destination, confirmed=args.yes, password=args.password)}")
         elif args.recovery_command == "restore":
-            print(f"Restore : {restore_snapshot(args.snapshot, args.destination, confirmed=args.yes)}")
+            print(f"Restore : {restore_snapshot(args.snapshot, args.destination, confirmed=args.yes, password=args.password)}")
         return
     if args.command in {"logs", "log"}:
         if args.logs_command == "list":
@@ -765,9 +828,8 @@ def dispatch(args: argparse.Namespace) -> None:
 def main() -> int:
     try:
         dispatch(parser().parse_args())
-        print("✓ Done")
         return 0
-    except (EclipseError, KeyboardInterrupt) as error:
+    except (EclipseError, OSError, ValueError, EOFError, KeyboardInterrupt) as error:
         message = "Operation interrupted." if isinstance(error, KeyboardInterrupt) else str(error)
         print(f"✗ {message}", file=sys.stderr)
         return 1

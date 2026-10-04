@@ -8,8 +8,7 @@ MIN_PYTHON="3.11"
 INSTALL_DIR="${HOME}/.local/share/eclipse-venv"
 BIN_DIR="${INSTALL_DIR}/bin"
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-WHEEL_PATH="${PROJECT_ROOT}/dist/eclipse_mac-0.3.0-py3-none-any.whl"
-SOURCE_ARCHIVE="${PROJECT_ROOT}/dist/eclipse_mac-0.3.0.tar.gz"
+PYTHON_BIN="${ECLIPSE_PYTHON:-python3}"
 PROFILE_FILE="${HOME}/.zprofile"
 ADD_TO_PATH=1
 UPGRADE_PIP=1
@@ -21,9 +20,10 @@ Usage: ./install.sh [options]
 
 Options:
   --install-dir <path>     Virtual environment path, default ~/.local/share/eclipse-venv
+  --python <executable>    Python 3.11+ interpreter (default python3)
   --source                 Install from the current project directory
-  --wheel                  Install from dist/eclipse_mac-0.3.0-py3-none-any.whl
-  --archive                Install from dist/eclipse_mac-0.3.0.tar.gz
+  --wheel                  Install the only eclipse_mac wheel in dist/
+  --archive                Install the only eclipse_mac source archive in dist/
   --no-path                Do not update ~/.zprofile
   --no-pip-upgrade         Do not upgrade pip before installing
   -h, --help               Show this help
@@ -54,9 +54,14 @@ expand_path() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir)
-      [[ $# -ge 2 ]] || fail "Missing value for --install-dir."
+      [[ $# -ge 2 && -n "$2" ]] || fail "Missing value for --install-dir."
       INSTALL_DIR="$(expand_path "$2")"
       BIN_DIR="${INSTALL_DIR}/bin"
+      shift 2
+      ;;
+    --python)
+      [[ $# -ge 2 && -n "$2" ]] || fail "Missing value for --python."
+      PYTHON_BIN="$2"
       shift 2
       ;;
     --source)
@@ -93,9 +98,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   fail "This installer is intended for macOS."
 fi
 
-command -v python3 >/dev/null 2>&1 || fail "python3 is required. Install Python ${MIN_PYTHON}+ first."
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || fail "Python ${MIN_PYTHON}+ is required. Install it from python.org, then use --python /path/to/python3 if needed."
 
-python3 - <<PY
+"$PYTHON_BIN" - <<PY
 import sys
 minimum = tuple(int(part) for part in "${MIN_PYTHON}".split("."))
 current = sys.version_info[:2]
@@ -115,31 +120,21 @@ if [[ "${#missing_tools[@]}" -gt 0 ]]; then
   warn "Some Eclipse features may be unavailable until these tools are installed."
 fi
 
-log "Creating virtual environment: ${INSTALL_DIR}"
-python3 -m venv "$INSTALL_DIR"
-
-if [[ "$UPGRADE_PIP" -eq 1 ]]; then
-  log "Upgrading pip"
-  "${BIN_DIR}/python" -m pip install --upgrade pip
-fi
-
 case "$INSTALL_MODE" in
   auto)
-    if [[ -f "$WHEEL_PATH" ]]; then
-      INSTALL_TARGET="$WHEEL_PATH"
-    elif [[ -f "$SOURCE_ARCHIVE" ]]; then
-      INSTALL_TARGET="$SOURCE_ARCHIVE"
-    else
-      INSTALL_TARGET="$PROJECT_ROOT"
-    fi
+    INSTALL_TARGET="$PROJECT_ROOT"
     ;;
   wheel)
-    [[ -f "$WHEEL_PATH" ]] || fail "Wheel not found: ${WHEEL_PATH}"
-    INSTALL_TARGET="$WHEEL_PATH"
+    shopt -s nullglob
+    artifacts=("${PROJECT_ROOT}"/dist/eclipse_mac-*.whl)
+    [[ ${#artifacts[@]} -eq 1 ]] || fail "Expected exactly one Eclipse wheel in dist/. Use --source or keep only the desired wheel."
+    INSTALL_TARGET="${artifacts[0]}"
     ;;
   archive)
-    [[ -f "$SOURCE_ARCHIVE" ]] || fail "Source archive not found: ${SOURCE_ARCHIVE}"
-    INSTALL_TARGET="$SOURCE_ARCHIVE"
+    shopt -s nullglob
+    artifacts=("${PROJECT_ROOT}"/dist/eclipse_mac-*.tar.gz)
+    [[ ${#artifacts[@]} -eq 1 ]] || fail "Expected exactly one Eclipse source archive in dist/. Use --source or keep only the desired archive."
+    INSTALL_TARGET="${artifacts[0]}"
     ;;
   source)
     INSTALL_TARGET="$PROJECT_ROOT"
@@ -149,13 +144,31 @@ case "$INSTALL_MODE" in
     ;;
 esac
 
+INSTALL_DIR="$("$PYTHON_BIN" -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$INSTALL_DIR")"
+BIN_DIR="${INSTALL_DIR}/bin"
+
+log "Creating virtual environment: ${INSTALL_DIR}"
+"$PYTHON_BIN" -m venv "$INSTALL_DIR"
+
+if [[ "$UPGRADE_PIP" -eq 1 ]]; then
+  log "Upgrading pip"
+  "${BIN_DIR}/python" -m pip install --upgrade pip
+fi
+
 log "Installing ${PACKAGE_NAME} from ${INSTALL_TARGET}"
 "${BIN_DIR}/python" -m pip install --upgrade "$INSTALL_TARGET"
+
+log "Verifying installation"
+"${BIN_DIR}/eclipse" --version
+"${BIN_DIR}/eclipse" scripts info backup-eclipse-data >/dev/null
+"${BIN_DIR}/eclipse" vps upload --help >/dev/null
+
 
 if [[ "$ADD_TO_PATH" -eq 1 ]]; then
   PATH_LINE='export PATH="$HOME/.local/share/eclipse-venv/bin:$PATH"'
   if [[ "$INSTALL_DIR" != "${HOME}/.local/share/eclipse-venv" ]]; then
-    PATH_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
+    printf -v QUOTED_BIN '%q' "$BIN_DIR"
+    PATH_LINE="export PATH=${QUOTED_BIN}:\$PATH"
   fi
   touch "$PROFILE_FILE"
   if ! grep -Fq "$PATH_LINE" "$PROFILE_FILE"; then
@@ -168,21 +181,18 @@ if [[ "$ADD_TO_PATH" -eq 1 ]]; then
   fi
 fi
 
-log "Verifying installation"
-"${BIN_DIR}/eclipse" --version
-"${BIN_DIR}/eclipse" scripts info backup-eclipse-data >/dev/null
-"${BIN_DIR}/eclipse" vps upload --help >/dev/null
 
+printf -v LAUNCH_COMMAND '%q ui' "${BIN_DIR}/eclipse"
 cat <<EOF
 
 ${APP_NAME} installed successfully.
 
 Run now:
-  ${BIN_DIR}/eclipse ui
+  ${LAUNCH_COMMAND}
 
-After opening a new terminal:
-  eclipse ui
+For future zsh terminals, PATH is configured unless --no-path was used.
+For other shells, use the full command above or add ${BIN_DIR} to PATH.
 
-VPS defaults can be configured in:
-  ${PROJECT_ROOT}/eclipse/vps/config/config.sh
+VPS uploads: pass --host, --user and --remote-path to eclipse vps upload.
+See README.md for configuration and troubleshooting.
 EOF

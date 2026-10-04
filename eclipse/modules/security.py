@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from eclipse.system.errors import EclipseError
+from eclipse.system.storage import atomic_write
 
 
 LEVEL_ORDER = {"OK": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
@@ -22,6 +23,12 @@ DEFAULT_CHECKS = ("security", "firewall", "sharing", "network", "persistence", "
 PASSWORD_ROTATION_DAYS = 183
 SENSITIVE_DOCKER_MOUNTS = ("/", "/etc", "/var/run/docker.sock", "/Users", str(Path.home()))
 REPORT_FORMATS = ("json", "markdown", "html")
+INVENTORY_IDS = {
+    "mac.firewall.apps", "mac.network.listeners", "mac.network.connections",
+    "mac.persistence.launch_items", "mac.persistence.shell_startup",
+    "mac.services.brew_services", "mac.services.brew_taps",
+    "mac.processes.top_cpu", "mac.processes.top_memory", "docker.containers",
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +97,8 @@ def password_status(path: Path | None = None, *, now: datetime | None = None) ->
         data = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return PasswordStatus(False, True, None, user, None)
+    if not isinstance(data, dict):
+        return PasswordStatus(False, True, None, user, None)
     confirmed = data.get("passwords_changed_at")
     if not confirmed:
         return PasswordStatus(False, True, None, str(data.get("user") or user), None)
@@ -97,9 +106,13 @@ def password_status(path: Path | None = None, *, now: datetime | None = None) ->
         confirmed_at = datetime.fromisoformat(str(confirmed))
     except ValueError:
         return PasswordStatus(False, True, None, str(data.get("user") or user), None)
+    if confirmed_at.tzinfo is None:
+        confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
     due_at = confirmed_at + timedelta(days=PASSWORD_ROTATION_DAYS)
     current = now or datetime.now(timezone.utc)
-    return PasswordStatus(True, current >= due_at, confirmed_at.isoformat(), str(data.get("user") or user), due_at.isoformat())
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return PasswordStatus(True, current >= due_at or confirmed_at > current, confirmed_at.isoformat(), str(data.get("user") or user), due_at.isoformat())
 
 
 def confirm_password_rotation(path: Path | None = None, *, user: str | None = None) -> PasswordStatus:
@@ -110,7 +123,7 @@ def confirm_password_rotation(path: Path | None = None, *, user: str | None = No
     }
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(state_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         state_path.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write security state: {error}") from error
@@ -159,7 +172,7 @@ def finding(
         detail,
         remediation,
         id=id,
-        status=status or status_for_level(level),
+        status=status or ("info" if level == "INFO" and id in INVENTORY_IDS else status_for_level(level)),
         source=source,
         evidence=evidence,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -214,9 +227,9 @@ def parse_sip_status(text: str) -> str:
 
 def parse_firewall_state(text: str) -> str:
     lowered = text.lower()
-    if "enabled" in lowered or "state = 1" in lowered:
+    if "enabled" in lowered or "state = 1" in lowered or "stealth mode is on" in lowered:
         return "enabled"
-    if "disabled" in lowered or "state = 0" in lowered:
+    if "disabled" in lowered or "state = 0" in lowered or "stealth mode is off" in lowered:
         return "disabled"
     return "unknown"
 
@@ -225,7 +238,7 @@ def parse_firewall_apps(text: str) -> tuple[str, ...]:
     apps: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped and not stripped.lower().startswith("applications"):
+        if re.match(r"^\d+\s*:", stripped):
             apps.append(stripped)
     return tuple(apps)
 
@@ -363,18 +376,22 @@ def check_firewall() -> list[Finding]:
 
 
 def check_sharing() -> list[Finding]:
-    _, listeners, _ = run_text(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], timeout=15)
+    code, listeners, error = run_text(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], timeout=15)
+    if code and (code != 1 or error.strip()):
+        return [finding("INFO", "sharing", "Sharing listeners could not be inspected", error, id="mac.sharing.remote_services", status="unknown", source="lsof TCP LISTEN")]
     selected = [line for line in listeners.splitlines() if re.search(r"screensharing|sshd|smbd|sharingd|rapportd|remoted", line, re.I)]
     if not selected:
         return [finding("OK", "sharing", "No monitored remote sharing service detected", id="mac.sharing.remote_services", source="lsof TCP LISTEN")]
+    remote = [line for line in selected if re.search(r"^(?:screensharing\S*|sshd|smbd)\s", line, re.I)]
     return [
         finding(
-            "WARNING",
+            "WARNING" if remote else "INFO",
             "sharing",
-            "Remote sharing services need review",
+            "Remote sharing services need review" if remote else "Local sharing-related listeners detected",
             "\n".join(selected[:20]),
             "Review enabled services in System Settings > General > Sharing.",
             id="mac.sharing.remote_services",
+            status="warn" if remote else "info",
             source="lsof TCP LISTEN",
         )
     ]
@@ -429,7 +446,7 @@ def check_services() -> list[Finding]:
     _, taps, _ = run_text(["brew", "tap"], timeout=20)
     custom = [tap for tap in taps.splitlines() if tap and tap not in {"homebrew/core", "homebrew/cask", "homebrew/services"}]
     if custom:
-        results.append(finding("WARNING", "services", "Non-standard Homebrew taps", "\n".join(custom), "Remove taps you do not recognize or no longer use.", id="mac.services.brew_taps", source="brew tap"))
+        results.append(finding("INFO", "services", "Additional Homebrew taps", "\n".join(custom), "Review these repositories if you do not recognize them; their presence alone is not a security issue.", id="mac.services.brew_taps", source="brew tap"))
     else:
         results.append(finding("OK", "services", "Standard Homebrew taps", id="mac.services.brew_taps", source="brew tap"))
     return results
@@ -454,16 +471,31 @@ def check_filesystem() -> list[Finding]:
         results.append(finding("INFO", "filesystem", "No ~/.ssh directory detected", id="mac.filesystem.ssh_keys", source="~/.ssh"))
     else:
         loose: list[str] = []
+        unreadable: list[str] = []
+        identified = 0
         for path in ssh_dir.iterdir():
             if not path.is_file() or path.name in {"config", "known_hosts"} or path.suffix == ".pub":
                 continue
-            mode = stat.S_IMODE(path.stat().st_mode)
-            if mode > 0o600:
+            try:
+                with path.open("rb") as stream:
+                    prefix = stream.read(256)
+                if not re.search(rb"-----BEGIN (?:OPENSSH |RSA |DSA |EC |ENCRYPTED )?PRIVATE KEY-----", prefix):
+                    continue
+                identified += 1
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except OSError:
+                unreadable.append(str(path))
+                continue
+            if mode & 0o077:
                 loose.append(f"{path} | mode={mode:o}")
         if loose:
             results.append(finding("WARNING", "filesystem", "Local keys with broad permissions", "\n".join(loose), "Reduce private key permissions with chmod 600.", id="mac.filesystem.ssh_keys", source="~/.ssh"))
-        else:
+        elif identified:
             results.append(finding("OK", "filesystem", "Local key permissions are restrictive", id="mac.filesystem.ssh_keys", source="~/.ssh"))
+        else:
+            results.append(finding("INFO", "filesystem", "No recognized private key found", id="mac.filesystem.ssh_keys", status="info", source="~/.ssh"))
+        if unreadable:
+            results.append(finding("INFO", "filesystem", "Some SSH files could not be inspected", "\n".join(unreadable), id="mac.filesystem.ssh_unreadable", status="unknown", source="~/.ssh"))
     writable = world_writable_paths()
     if writable:
         results.append(finding("WARNING", "filesystem", "Sensitive world-writable directories", "\n".join(str(path) for path in writable[:30]), "Review owner and permissions for these directories.", id="mac.filesystem.world_writable", source="os.walk"))
@@ -485,10 +517,10 @@ def check_processes() -> list[Finding]:
 
 def check_docker() -> list[Finding]:
     if not available("docker"):
-        return [finding("INFO", "docker", "Docker not installed", id="docker.available", source="shutil.which")]
+        return [finding("INFO", "docker", "Docker not installed", id="docker.available", status="not_applicable", source="shutil.which")]
     code, _, _ = run_text(["docker", "info"], timeout=15)
     if code:
-        return [finding("WARNING", "docker", "Docker installed but daemon unavailable", id="docker.daemon", source="docker info")]
+        return [finding("INFO", "docker", "Docker runtime could not be inspected", "The daemon may be stopped or inaccessible. Container checks were not performed.", id="docker.daemon", status="skipped", source="docker info")]
     results = [finding("OK", "docker", "Docker daemon active", id="docker.daemon", source="docker info")]
     _, containers, _ = run_text(["docker", "ps", "-a", "--format", "table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}"], timeout=20)
     if containers:
@@ -667,7 +699,7 @@ def write_report(findings: list[Finding], destination: Path | None = None) -> Pa
     payload = report_payload(findings)
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         path.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write security report: {error}") from error
@@ -726,7 +758,7 @@ def save_baseline(findings: list[Finding], path: Path | None = None) -> Path:
     payload["kind"] = "security-baseline"
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(target, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         target.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write security baseline: {error}") from error
@@ -783,7 +815,7 @@ def write_default_policy(path: Path | None = None, *, overwrite: bool = False) -
         raise EclipseError(f"Security policy already exists: {target}")
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target.write_text(json.dumps(default_policy(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(target, json.dumps(default_policy(), ensure_ascii=False, indent=2) + "\n")
         target.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write security policy: {error}") from error
@@ -935,11 +967,11 @@ def export_report(report: dict[str, Any], destination: Path, *, format: str) -> 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if format == "json":
-            target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            atomic_write(target, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         elif format == "markdown":
-            target.write_text(report_markdown(report), encoding="utf-8")
+            atomic_write(target, report_markdown(report))
         else:
-            target.write_text(report_html(report), encoding="utf-8")
+            atomic_write(target, report_html(report))
     except OSError as error:
         raise EclipseError(f"Unable to export security report: {error}") from error
     return target
@@ -1057,8 +1089,43 @@ def format_remediation_plan(rows: list[dict[str, str | int]]) -> str:
     return "\n".join(lines)
 
 
+def format_scan_summary(findings: list[Finding]) -> str:
+    """Concise UI result; raw evidence remains in the full report."""
+    groups = (
+        ("PROTECTIONS / CHECKS PASSED", [item for item in findings if item.level == "OK"]),
+        ("NEEDS REVIEW", sorted([item for item in findings if item.level in {"WARNING", "ERROR", "CRITICAL"}],
+                                key=lambda item: LEVEL_ORDER[item.level], reverse=True)),
+        ("NOT CHECKED / UNCERTAIN", [item for item in findings if (item.status or status_for_level(item.level)) in {"unknown", "skipped"}]),
+    )
+    lines = ["SCAN SUMMARY", ""]
+    if not findings:
+        return "SCAN SUMMARY\nNo results available; protection status could not be assessed."
+    for title, items in groups:
+        lines.append(f"{title} ({len(items)})")
+        for item in items[:5]:
+            label = f"[{item.level}] " if title == "NEEDS REVIEW" else ""
+            lines.append(f"  {label}{item.title}")
+        if len(items) > 5:
+            lines.append(f"  + {len(items) - 5} more in the full report")
+        if not items:
+            lines.append("  None reported.")
+        lines.append("")
+    inventory = sum(item.status in {"info", "not_applicable"} for item in findings)
+    lines.append(f"{inventory} inventory / not-applicable results available in the full report.")
+    lines.append("Results cover the checks performed; they do not guarantee the whole Mac is secure.")
+    return "\n".join(lines)
+
+
 def format_findings(findings: list[Finding]) -> str:
-    lines = [f"Security score: {security_score(findings)}/100", f"Summary: {summary(findings)}", ""]
+    unknown = sum((item.status or status_for_level(item.level)) == "unknown" for item in findings)
+    categories = sorted({item.category for item in findings})
+    score = f"{security_score(findings)}/100" if findings else "unavailable (no findings)"
+    lines = [f"Security score: {score} (heuristic)",
+             "Scoring: starts at 100; WARNING -8, ERROR -10, CRITICAL -25; minimum 0.",
+             f"Reported categories: {', '.join(categories) or 'none'}",
+             f"Results: {len(findings)} total, {unknown} unknown. Unknown results do not lower the score.",
+             "This score applies only to the reported findings, not the whole Mac.",
+             f"Summary: {summary(findings)}", ""]
     for item in sorted(findings, key=lambda value: LEVEL_ORDER[value.level], reverse=True):
         lines.append(f"[{item.level}] {item.category} - {item.title}")
         if item.detail:

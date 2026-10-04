@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from eclipse.modules.audit import default_log_path
 from eclipse.modules.automation import history_path as automation_history_path
 from eclipse.system.errors import EclipseError
+from eclipse.system.storage import atomic_write
 from eclipse.modules.scripts import history_path as scripts_history_path
 from eclipse.modules.security import default_report_dir
 
@@ -180,6 +181,8 @@ def collect_logs(
     until: str | None = None,
     include_system: bool = False,
 ) -> list[LogEntry]:
+    if limit < 1:
+        raise EclipseError("Log limit must be positive.")
     selected = tuple(sources or ("audit", "scripts", "automation", "security"))
     unknown = [source for source in selected if source not in LOG_SOURCES]
     if unknown:
@@ -198,7 +201,10 @@ def collect_logs(
     query_text = query.lower() if query else None
     since_value = datetime.fromisoformat(since).timestamp() if since else None
     until_value = datetime.fromisoformat(until).timestamp() if until else None
+    if since_value is not None and until_value is not None and since_value > until_value:
+        raise EclipseError("Log start date must precede the end date.")
     filtered: list[LogEntry] = []
+    timestamps: dict[int, float] = {}
     for row in rows:
         if user and row.user != user:
             continue
@@ -209,12 +215,15 @@ def collect_logs(
             stamp = datetime.fromisoformat(row.timestamp.replace("Z", "+00:00")).timestamp()
         except ValueError:
             stamp = None
+        if stamp is None and (since_value is not None or until_value is not None):
+            continue
         if stamp is not None and since_value is not None and stamp < since_value:
             continue
         if stamp is not None and until_value is not None and stamp > until_value:
             continue
         filtered.append(row)
-    return sorted(filtered, key=lambda item: item.timestamp)[-limit:]
+        timestamps[id(row)] = stamp if stamp is not None else float("-inf")
+    return sorted(filtered, key=lambda item: timestamps[id(item)])[-limit:]
 
 
 def format_log(entry: LogEntry) -> str:
@@ -225,7 +234,7 @@ def export_logs(entries: list[LogEntry], destination: Path) -> Path:
     target = destination.expanduser()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps([entry.to_record() for entry in entries], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(target, json.dumps([entry.to_record() for entry in entries], ensure_ascii=False, indent=2) + "\n")
     except OSError as error:
         raise EclipseError(f"Unable to export logs: {error}") from error
     return target.resolve()

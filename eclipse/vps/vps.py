@@ -4,6 +4,7 @@ import json
 import re
 import shlex
 import subprocess
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,11 +105,16 @@ def validate_remote(host: str, remote_path: str, user: str | None = None) -> tup
     clean_host = host.strip()
     clean_user = (user or "").strip()
     clean_path = remote_path.strip()
-    if not clean_host or not HOST_RE.fullmatch(clean_host):
+    if not clean_host or clean_host.startswith("-") or not HOST_RE.fullmatch(clean_host):
         raise EclipseError("Invalid VPS host.")
-    if clean_user and not USER_RE.fullmatch(clean_user):
+    if ":" in clean_host:
+        try:
+            clean_host = f"[{ipaddress.IPv6Address(clean_host)}]"
+        except ValueError as error:
+            raise EclipseError("Invalid VPS IPv6 address.") from error
+    if clean_user and (clean_user.startswith("-") or not USER_RE.fullmatch(clean_user)):
         raise EclipseError("Invalid VPS user.")
-    if not clean_path or not REMOTE_PATH_RE.fullmatch(clean_path):
+    if not clean_path or clean_path.startswith("-") or not REMOTE_PATH_RE.fullmatch(clean_path):
         raise EclipseError("Invalid VPS remote path.")
     login = f"{clean_user}@{clean_host}" if clean_user else clean_host
     return login, clean_path
@@ -172,7 +178,7 @@ def upload_path(
         completed = subprocess.run(rsync_command, check=False, text=True, capture_output=True)
         return UploadResult(local_source, destination, True, completed.returncode, completed.stdout or "", completed.stderr or "")
 
-    mkdir_command = ["ssh", *ssh_args, login, "mkdir", "-p", clean_remote_path]
+    mkdir_command = ["ssh", *ssh_args, login.replace("[", "").replace("]", ""), "mkdir", "-p", "--", clean_remote_path]
     mkdir = subprocess.run(mkdir_command, check=False, text=True, capture_output=True)
     if mkdir.returncode:
         return UploadResult(local_source, destination, False, mkdir.returncode, mkdir.stdout or "", mkdir.stderr or "")

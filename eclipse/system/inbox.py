@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from fnmatch import fnmatch
 import os
+import tempfile
 from pathlib import Path
 from typing import Iterable
 from zipfile import BadZipFile, ZipFile
@@ -77,12 +78,13 @@ def backup_path(path: Path, *, backup_dir: Path | None = None) -> Path | None:
     if not source.exists():
         return None
     root = (backup_dir or default_backup_dir()).expanduser()
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    destination = root / stamp / source.name
+    if source.is_dir() and (root.resolve() == source or source in root.resolve().parents):
+        raise EclipseError("Backup destination must be outside the source directory.")
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination = Path(tempfile.mkdtemp(prefix="backup-", dir=root)) / source.name
         if source.is_dir():
-            shutil.copytree(source, destination)
+            shutil.copytree(source, destination, symlinks=True)
         else:
             shutil.copy2(source, destination)
     except OSError as error:
@@ -140,7 +142,7 @@ def list_entries(folder: Path, *, limit: int = 50, include_hidden: bool = False)
             continue
         try:
             entries.append(inspect_path(item))
-        except OSError:
+        except (OSError, EclipseError):
             continue
         if len(entries) >= limit:
             break
@@ -163,11 +165,14 @@ def read_text(path: Path, *, max_bytes: int = 20000) -> str:
     if max_bytes < 1:
         raise EclipseError("Read size must be positive.")
     try:
-        data = target.read_bytes()[:max_bytes]
+        with target.open("rb") as stream:
+            data = stream.read(max_bytes)
+            truncated = bool(stream.read(1))
     except OSError as error:
         raise EclipseError(f"Unable to read file: {error}") from error
     try:
-        return data.decode("utf-8")
+        import codecs
+        return codecs.getincrementaldecoder("utf-8")().decode(data, final=not truncated)
     except UnicodeDecodeError as error:
         raise EclipseError("File is not readable as UTF-8 from Eclipse.") from error
 
@@ -224,19 +229,25 @@ def copy_path(
 ) -> Path:
     src = resolve_path(source)
     dst = destination.expanduser()
+    require_disjoint_paths(src, dst)
     require_write_confirmation((dst,), confirmed=confirmed)
     if not src.exists():
         raise EclipseError(f"Path not found: {src}")
-    if dst.exists() and not overwrite:
+    if (dst.exists() or dst.is_symlink()) and not overwrite:
         raise EclipseError(f"Destination already exists: {dst}")
     backup = backup_path(dst) if create_backup and dst.exists() else None
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
             if dst.exists() and overwrite:
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst)
+                if dst.is_dir() and not dst.is_symlink():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink()
+            shutil.copytree(src, dst, symlinks=True)
         else:
+            if dst.is_dir():
+                raise EclipseError("Cannot replace a directory with a file.")
             shutil.copy2(src, dst)
     except OSError as error:
         record("file-copy", success=False, details={"source": str(src), "destination": str(dst), "error": str(error)})
@@ -254,20 +265,21 @@ def move_path(
     confirmed: bool = False,
     create_backup: bool = True,
 ) -> Path:
-    src = resolve_path(source)
+    src = source.expanduser().absolute()
     dst = destination.expanduser()
+    require_disjoint_paths(src, dst)
     require_write_confirmation((src, dst), confirmed=confirmed)
     if not src.exists():
         raise EclipseError(f"Path not found: {src}")
-    if dst.exists() and not overwrite:
+    if (dst.exists() or dst.is_symlink()) and not overwrite:
         raise EclipseError(f"Destination already exists: {dst}")
     backups = [backup_path(src)] if create_backup else []
     if create_backup and dst.exists():
         backups.append(backup_path(dst))
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists() and overwrite:
-            if dst.is_dir():
+        if (dst.exists() or dst.is_symlink()) and overwrite:
+            if dst.is_dir() and not dst.is_symlink():
                 shutil.rmtree(dst)
             else:
                 dst.unlink()
@@ -285,21 +297,21 @@ def move_path(
 
 
 def rename_path(source: Path, name: str, *, overwrite: bool = False, confirmed: bool = False, create_backup: bool = True) -> Path:
-    if not name or "/" in name:
+    if not name or name in {".", ".."} or "/" in name or "\x00" in name:
         raise EclipseError("Invalid rename target.")
-    src = resolve_path(source)
+    src = source.expanduser().absolute()
     return move_path(src, src.with_name(name), overwrite=overwrite, confirmed=confirmed, create_backup=create_backup)
 
 
 def trash_path(path: Path, *, trash_dir: Path | None = None, confirmed: bool = False, create_backup: bool = True) -> Path:
-    target = resolve_path(path)
+    target = path.expanduser().absolute()
     require_write_confirmation((target,), confirmed=confirmed)
-    if not target.exists():
+    if not target.exists() and not target.is_symlink():
         raise EclipseError(f"Path not found: {target}")
     trash = (trash_dir or Path.home() / ".Trash").expanduser()
     destination = trash / target.name
     index = 2
-    while destination.exists():
+    while destination.exists() or destination.is_symlink():
         destination = trash / f"{target.stem}-{index}{target.suffix}"
         index += 1
     backup = backup_path(target) if create_backup else None
@@ -337,13 +349,20 @@ def edit_line(
         raise EclipseError("Line number must be positive.")
     target = resolve_path(path)
     require_write_confirmation((target,), confirmed=confirmed)
-    lines = read_text(target).splitlines()
+    try:
+        with target.open("r", encoding="utf-8", newline="") as stream:
+            lines = stream.readlines()
+    except (OSError, UnicodeError) as error:
+        raise EclipseError(f"Unable to read file for editing: {error}") from error
     if line_number > len(lines):
         raise EclipseError(f"Missing line: {line_number}")
-    lines[line_number - 1] = text
+    original = lines[line_number - 1]
+    ending = "\r\n" if original.endswith("\r\n") else "\n" if original.endswith("\n") else "\r" if original.endswith("\r") else ""
+    lines[line_number - 1] = text + ending
     backup = backup_path(target) if create_backup else None
     try:
-        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with target.open("w", encoding="utf-8", newline="") as stream:
+            stream.write("".join(lines))
     except OSError as error:
         record("file-edit", success=False, details={"path": str(target), "line": line_number, "error": str(error)})
         raise EclipseError(f"Unable to edit file: {error}") from error
@@ -378,7 +397,8 @@ def file_info(path: Path) -> list[str]:
 
 
 def image_dimensions(path: Path) -> str | None:
-    data = path.read_bytes()[:32]
+    with path.open("rb") as stream:
+        data = stream.read(32)
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         width = int.from_bytes(data[16:20], "big")
         height = int.from_bytes(data[20:24], "big")
@@ -435,6 +455,8 @@ def search_entries(
     include_hidden: bool = False,
 ) -> list[FileEntry]:
     base = resolve_path(root)
+    if limit < 1 or max_depth < 1:
+        raise EclipseError("Search limit and depth must be positive.")
     if not base.is_dir():
         raise EclipseError(f"This local path is not a directory: {base}")
     results: list[FileEntry] = []
@@ -474,17 +496,26 @@ def search_entries(
                 if not path.is_file():
                     continue
                 try:
-                    sample = path.read_bytes()[:1_000_000].decode("utf-8", errors="ignore").lower()
+                    with path.open("rb") as stream:
+                        sample = stream.read(1_000_000).decode("utf-8", errors="ignore").lower()
                 except OSError:
                     continue
                 if content_text not in sample:
                     continue
             results.append(inspect_path(path))
-        except OSError:
+        except (OSError, EclipseError):
             continue
         if len(results) >= limit:
             break
     return results
+
+
+def require_disjoint_paths(source: Path, destination: Path) -> None:
+    src, dst = source.resolve(), destination.resolve()
+    if src == dst or src in dst.parents or dst in src.parents:
+        raise EclipseError("Source and destination must not be identical or nested.")
+    if dst.exists() and src.exists() and src.samefile(dst):
+        raise EclipseError("Source and destination refer to the same file.")
 
 
 def export_entries(entries: list[FileEntry], destination: Path) -> Path:

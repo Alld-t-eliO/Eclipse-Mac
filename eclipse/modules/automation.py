@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from eclipse.modules.audit import record
 from eclipse.system.errors import EclipseError
+from eclipse.system.storage import atomic_write, serialized
 from eclipse.system.runner import Result, shell_display
 
 
@@ -180,7 +181,13 @@ def load_jobs(root: Path | None = None) -> dict[str, AutomationJob]:
     jobs: dict[str, AutomationJob] = {}
     for item in raw:
         if isinstance(item, dict):
-            job = AutomationJob.from_record(item)
+            try:
+                job = AutomationJob.from_record(item)
+            except (ValueError, TypeError) as error:
+                raise EclipseError(f"Invalid automation registry: {error}") from error
+            validate_interval(job.every)
+            if not isinstance(item.get("enabled", True), bool) or not job.command:
+                raise EclipseError("Invalid automation state or command.")
             if job.name:
                 jobs[job.name] = job
     return jobs
@@ -191,12 +198,13 @@ def save_jobs(jobs: dict[str, AutomationJob], root: Path | None = None) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         records = [job.to_record() for job in sorted(jobs.values(), key=lambda item: item.name)]
-        path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write(path, json.dumps(records, ensure_ascii=False, indent=2) + "\n")
         path.chmod(0o600)
     except OSError as error:
         raise EclipseError(f"Unable to write automation registry: {error}") from error
 
 
+@serialized(lambda options: registry_path(options.get("root")))
 def add_job(
     name: str,
     *,
@@ -205,6 +213,11 @@ def add_job(
     root: Path | None = None,
     overwrite: bool = False,
 ) -> AutomationJob:
+    if not name.strip():
+        raise EclipseError("Automation name must not be empty.")
+    requested = tuple(command) if command is not None else default_command(name)
+    if not requested or requested[0] in {"automation", "auto", "ui"}:
+        raise EclipseError("Automation command must be noninteractive and cannot invoke automation recursively.")
     interval = validate_interval(every)
     jobs = load_jobs(root)
     if name in jobs and not overwrite:
@@ -212,7 +225,7 @@ def add_job(
     job = AutomationJob(
         name=name,
         every=interval,
-        command=tuple(command or default_command(name)),
+        command=requested,
         enabled=True,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -221,6 +234,7 @@ def add_job(
     return job
 
 
+@serialized(lambda options: registry_path(options.get("root")))
 def set_enabled(name: str, enabled: bool, *, root: Path | None = None) -> AutomationJob:
     jobs = load_jobs(root)
     if name not in jobs:
@@ -241,7 +255,12 @@ def is_due(job: AutomationJob, *, now: datetime | None = None) -> bool:
         last = datetime.fromisoformat(job.last_run_at)
     except ValueError:
         return True
-    return (now or datetime.now(timezone.utc)) - last >= INTERVALS[job.every]
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current - last >= INTERVALS[validate_interval(job.every)]
 
 
 def append_history(job: AutomationJob, result: Result, *, dry_run: bool, root: Path | None = None) -> None:
@@ -273,7 +292,12 @@ def run_job(name: str, *, root: Path | None = None, dry_run: bool = False) -> Re
         result = Result(0, shell_display(command), "")
         append_history(job, result, dry_run=True, root=root)
         return result
-    completed = subprocess.run(command, check=False, text=True)
+    if job.command[0] in {"automation", "auto", "ui"}:
+        raise EclipseError("Recursive or interactive automation is not allowed.")
+    try:
+        completed = subprocess.run(command, check=False, text=True)
+    except OSError as error:
+        raise EclipseError(f"Unable to run automation: {error}") from error
     result = Result(completed.returncode, "", "")
     updated = AutomationJob(
         job.name,
