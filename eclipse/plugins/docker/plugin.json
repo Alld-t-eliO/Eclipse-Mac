@@ -1,0 +1,5 @@
+{
+  "name": "docker",
+  "description": "Docker checks and workflows for Eclipse.",
+  "enabled": true
+}

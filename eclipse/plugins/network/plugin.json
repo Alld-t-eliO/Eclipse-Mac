@@ -1,0 +1,5 @@
+{
+  "name": "network",
+  "description": "Network inspection workflows for Eclipse.",
+  "enabled": true
+}
